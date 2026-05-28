@@ -1,0 +1,61 @@
+{
+  "game": {
+    "title": "Hungry Penguin Fishing",
+    "scoreLine": "Score {{score}}    Best {{best}}",
+    "hungerLabel": "Penguin Hunger",
+    "windLabel": "Wind {{level}}",
+    "helpDesktop": "Press & DRAG to cast — release to fling the hook.\nClick REEL to twitch the line, swipe UP to hook a bite,\nthen tap/hold the PULL panel and follow the events.",
+    "helpMobile": "Press & DRAG to cast — release to fling the hook.\nTap REEL to twitch the line, swipe UP to hook a bite,\nthen tap/hold the PULL panel and follow the events.",
+    "reelButton": "REEL",
+    "snapReelButton": "FAST REEL",
+    "pullButton": "PULL",
+    "castHint": "Drag and release to cast",
+    "powerHint": "Power {{power}}%",
+    "depthHint": "Depth {{depth}}m",
+    "waitingHint": "Twitch the bait — REEL to attract fish",
+    "biteHint": "STRIKE !  Swipe UP to set the hook",
+    "missedHint": "It got away…",
+    "followFish": "FOLLOW  THE  FISH !",
+    "fishRunning": "FISH  IS  RUNNING !  Swipe {{dir}} !",
+    "tensionBroken": "Line snapped !",
+    "caughtBanner": "Caught a {{rarity}} {{name}} ! +{{score}}",
+    "bonusCaught": "Order delivered ! Hunger -{{relief}}",
+    "missCommission": "Penguin sighs — not the fish it ordered.",
+    "directionUp": "UP",
+    "directionDown": "DOWN",
+    "directionLeft": "LEFT",
+    "directionRight": "RIGHT",
+    "windCalm": "Calm waters",
+    "windBreeze": "Light breeze",
+    "windStrong": "Strong wind",
+    "windStorm": "STORM !"
+  },
+  "penguin": {
+    "request": "I'm hungry. Catch me a {{wish}} (><)",
+    "happy": "Mmm! Tasty! (^o^)",
+    "sad": "I'm starving… (x x)",
+    "neutral": "Hurry up… (._.)",
+    "weak": "So… hungry… (x x)",
+    "double": "DOUBLE reward if you catch it now ! (>o<)"
+  },
+  "fish": {
+    "sardine": "Sardine",
+    "mackerel": "Mackerel",
+    "tuna": "Tuna",
+    "anglerfish": "Anglerfish",
+    "krakenling": "Krakenling",
+    "moonfish": "Moonfish",
+    "rarityCommon": "Common",
+    "rarityUncommon": "Uncommon",
+    "rarityRare": "Rare",
+    "rarityEpic": "Epic",
+    "rarityLegendary": "LEGENDARY"
+  },
+  "loading": {
+    "game": "Loading game...",
+    "default": "Loading...",
+    "progress1": "Loading.",
+    "progress2": "Loading..",
+    "start": "Loading"
+  }
+}

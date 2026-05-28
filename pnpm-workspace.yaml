@@ -1,0 +1,10 @@
+packages:
+  - game/*
+  - packages/*
+allowBuilds:
+  esbuild: true
+  tree-sitter: true
+  tree-sitter-html: true
+  tree-sitter-javascript: true
+  tree-sitter-json: true
+  tree-sitter-typescript: true

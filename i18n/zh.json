@@ -1,0 +1,61 @@
+{
+  "game": {
+    "title": "饿企鹅钓鱼记",
+    "scoreLine": "得分 {{score}}    最佳 {{best}}",
+    "hungerLabel": "企鹅饥饿值",
+    "windLabel": "风力 {{level}}",
+    "helpDesktop": "按住并拖动屏幕蓄力 — 松手把钩甩出去。\n点击「收线」抖动鱼饵，鱼咬钩时向上滑动设钩，\n之后在「拉力」面板点按/长按并跟随屏幕事件。",
+    "helpMobile": "按住并拖动屏幕蓄力 — 松手把钩甩出去。\n点击「收线」抖动鱼饵，鱼咬钩时向上滑动设钩，\n之后在「拉力」面板点按/长按并跟随屏幕事件。",
+    "reelButton": "收线",
+    "snapReelButton": "快收",
+    "pullButton": "拉力",
+    "castHint": "拖动并松手抛竿",
+    "powerHint": "力度 {{power}}%",
+    "depthHint": "深度 {{depth}}m",
+    "waitingHint": "抖动鱼饵 — 点收线诱鱼",
+    "biteHint": "提竿！向上滑动设钩",
+    "missedHint": "鱼跑了…",
+    "followFish": "跟  紧  鱼 !",
+    "fishRunning": "鱼  要  跑  了 !  向{{dir}}反击 !",
+    "tensionBroken": "线断了！",
+    "caughtBanner": "钓到 {{rarity}} {{name}} ！+{{score}}",
+    "bonusCaught": "订单完成！饥饿 -{{relief}}",
+    "missCommission": "企鹅叹了口气——不是它要的那条。",
+    "directionUp": "上",
+    "directionDown": "下",
+    "directionLeft": "左",
+    "directionRight": "右",
+    "windCalm": "海面平静",
+    "windBreeze": "微风轻拂",
+    "windStrong": "大风呼啸",
+    "windStorm": "狂  风  暴  雨 !"
+  },
+  "penguin": {
+    "request": "我饿了，给我钓一条 {{wish}} 吧 (><)",
+    "happy": "嗯～好吃！(^o^)",
+    "sad": "饿…死…了…(x x)",
+    "neutral": "快点啊…(._.)",
+    "weak": "好…饿…啊…(x x)",
+    "double": "现在钓上来双倍奖励！(>o<)"
+  },
+  "fish": {
+    "sardine": "沙丁鱼",
+    "mackerel": "鲭鱼",
+    "tuna": "金枪鱼",
+    "anglerfish": "鮟鱇鱼",
+    "krakenling": "小克拉肯",
+    "moonfish": "月之鱼",
+    "rarityCommon": "普通",
+    "rarityUncommon": "稀有",
+    "rarityRare": "珍贵",
+    "rarityEpic": "史诗",
+    "rarityLegendary": "传说"
+  },
+  "loading": {
+    "game": "加载游戏中...",
+    "default": "加载中...",
+    "progress1": "加载中.",
+    "progress2": "加载中..",
+    "start": "加载中"
+  }
+}

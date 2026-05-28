@@ -1,0 +1,27 @@
+{
+  "name": "forgeax-game-pixijs-2d",
+  "version": "1.0.0",
+  "description": "PixiJS 2D game template with shared gameplay core",
+  "type": "module",
+  "scripts": {
+    "dev": "cross-env VITE_I18N_MODE=dev vite --host",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "build:analyze": "cross-env VITE_I18N_MODE=dev NODE_ENV=analyze vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@eebuk/cli": "^1.0.5",
+    "@minigame/core": "workspace:*",
+    "@minigame/i18n": "workspace:*",
+    "@minigame/platform": "workspace:*",
+    "@minigame/render-adapter": "workspace:*",
+    "pixi.js": "^8.18.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.0",
+    "cross-env": "^7.0.3",
+    "rollup-plugin-visualizer": "^5.14.0",
+    "typescript": "5.7.2",
+    "vite": "7.3.1"
+  }
+}

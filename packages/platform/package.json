@@ -1,0 +1,8 @@
+{
+  "name": "@minigame/platform",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "source/index.ts",
+  "module": "source/index.ts",
+  "types": "source/index.ts"
+}

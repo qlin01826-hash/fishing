@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+  <meta name="theme-color" content="#1c3a6e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>钓鱼企鹅 · Fishing Penguin</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      /* dvh tracks the URL bar showing/hiding, svh is the always-safe
+         fallback for older browsers. Without this the canvas gets sized
+         against the layout viewport (which includes the URL-bar area
+         even when hidden), and Pixi renders 60px of extra height that
+         gets vertically squashed into the visible region. */
+      height: 100svh;
+      height: 100dvh;
+      overflow: hidden;
+    }
+    body {
+      margin: 0;
+      position: fixed;
+      inset: 0;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
+      background: linear-gradient(#1c3a6e 0%, #2f6aa3 55%, #073048 100%);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    #game-container {
+      width: 100%;
+      height: 100svh;
+      height: 100dvh;
+      position: relative;
+      overflow: hidden;
+      touch-action: none;
+      outline: none;
+    }
+    canvas { display: block; }
+    #loading-screen {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: linear-gradient(#1c3a6e 0%, #2f6aa3 55%, #073048 100%);
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center; color: #ffeec7;
+      font-family: system-ui; z-index: 2000; transition: opacity 0.3s;
+    }
+    #loading-screen.hidden { opacity: 0; pointer-events: none; }
+    .loading-spinner {
+      width: 40px; height: 40px; border: 3px solid rgba(255,238,199,0.25);
+      border-top-color: #ffd166; border-radius: 50%;
+      animation: spin 1s linear infinite; margin-bottom: 20px;
+    }
+    .loading-text { font-size: 14px; letter-spacing: 0.08em; opacity: 0.85; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Portrait-mode landscape lock — overlay shows on phones held upright
+       and disappears automatically the moment the device rotates. */
+    #rotate-screen {
+      position: fixed; inset: 0;
+      display: none;
+      flex-direction: column;
+      justify-content: center; align-items: center;
+      background: linear-gradient(135deg, #0e2848 0%, #1c3a6e 55%, #073048 100%);
+      color: #ffeec7; font-family: system-ui;
+      z-index: 3000; padding: 24px; text-align: center;
+      gap: 18px;
+    }
+    #rotate-screen .icon {
+      width: 80px; height: 130px;
+      border: 4px solid #ffd166; border-radius: 12px;
+      position: relative;
+      transform-origin: center;
+      animation: rotate-hint 2.4s ease-in-out infinite;
+    }
+    #rotate-screen .icon::before {
+      content: ''; position: absolute;
+      left: 50%; bottom: 6px;
+      transform: translateX(-50%);
+      width: 28px; height: 6px;
+      border-radius: 3px; background: #ffd166;
+      opacity: 0.7;
+    }
+    #rotate-screen .icon::after {
+      content: ''; position: absolute;
+      left: 50%; top: 6px;
+      transform: translateX(-50%);
+      width: 14px; height: 4px;
+      border-radius: 2px; background: #ffd166;
+      opacity: 0.5;
+    }
+    @keyframes rotate-hint {
+      0%, 25% { transform: rotate(0deg); }
+      50%, 75% { transform: rotate(-90deg); }
+      100% { transform: rotate(0deg); }
+    }
+    #rotate-screen .title { font-size: 18px; font-weight: 700; letter-spacing: 0.04em; }
+    #rotate-screen .sub { font-size: 13px; opacity: 0.75; max-width: 280px; line-height: 1.5; }
+
+    @media (orientation: portrait) and (max-device-width: 1024px) {
+      #rotate-screen { display: flex; }
+      #game-container { visibility: hidden; }
+    }
+  </style>
+</head>
+<body tabindex="0">
+  <div id="game-container" tabindex="0">
+    <div id="loading-screen">
+      <div class="loading-spinner"></div>
+      <div class="loading-text">Loading...</div>
+    </div>
+  </div>
+  <div id="rotate-screen" aria-hidden="true">
+    <div class="icon"></div>
+    <div class="title">请将手机横屏</div>
+    <div class="sub">Fishing Penguin 需要横屏体验更好。<br>Rotate your phone to landscape.</div>
+  </div>
+  <script type="module" src="../game/client/main.ts"></script>
+  <script>
+    window.addEventListener('load', () => document.body.focus());
+    document.addEventListener('click', () => document.body.focus());
+    // iOS Safari: prevent rubber-band scroll
+    document.addEventListener('touchmove', function (e) {
+      if (e.touches.length > 1) return;
+      e.preventDefault();
+    }, { passive: false });
+    // Try every user gesture (not just the first) to enter fullscreen +
+    // lock landscape. Once successful we stop. iOS Safari on iPhone
+    // does NOT support requestFullscreen for the document — we rely on
+    // the dvh + visualViewport sizing path for that platform instead.
+    (function(){
+      var done = false;
+      var isMobileLike = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+      function fullscreenSupported(){
+        var root = document.documentElement;
+        return !!(root.requestFullscreen || root.webkitRequestFullscreen);
+      }
+      function enterImmersive(){
+        if (done) return;
+        var root = document.documentElement;
+        try {
+          if (root.requestFullscreen) {
+            root.requestFullscreen({ navigationUI: 'hide' }).then(function(){ done = true; }).catch(function(){});
+          } else if (root.webkitRequestFullscreen) {
+            root.webkitRequestFullscreen();
+            done = true;
+          }
+        } catch (e) { /* no-op */ }
+        try {
+          if (screen.orientation && screen.orientation.lock) {
+            setTimeout(function(){
+              screen.orientation.lock('landscape').catch(function(){});
+            }, 100);
+          }
+        } catch (e) { /* no-op */ }
+        setTimeout(function(){ window.scrollTo(0, 1); }, 50);
+      }
+      if (!isMobileLike || !fullscreenSupported()) {
+        done = true;
+        return;
+      }
+      window.addEventListener('pointerdown', enterImmersive, { passive: true });
+      window.addEventListener('keydown', enterImmersive);
+      document.addEventListener('fullscreenchange', function(){
+        if (document.fullscreenElement) done = true;
+      });
+      window.addEventListener('resize', function(){
+        if (window.innerHeight < 500) window.scrollTo(0, 1);
+      });
+    })();
+  </script>
+</body>
+</html>

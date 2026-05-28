@@ -1,0 +1,10 @@
+node_modules
+dist
+*.local
+.DS_Store
+
+# VAG chat database
+.chat/
+
+# pnpm store
+.pnpm-store/
