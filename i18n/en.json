@@ -39,11 +39,16 @@
     "double": "DOUBLE reward if you catch it now ! (>o<)"
   },
   "fish": {
+    "shrimp": "Shrimp",
     "sardine": "Sardine",
     "mackerel": "Mackerel",
-    "tuna": "Tuna",
+    "pufferfish": "Pufferfish",
+    "jellyfish": "Jellyfish",
     "anglerfish": "Anglerfish",
     "krakenling": "Krakenling",
+    "tuna": "Tuna",
+    "swordfish": "Swordfish",
+    "ray": "Manta Ray",
     "moonfish": "Moonfish",
     "rarityCommon": "Common",
     "rarityUncommon": "Uncommon",

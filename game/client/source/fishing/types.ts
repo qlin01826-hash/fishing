@@ -11,10 +11,39 @@ export type Direction = 'up' | 'down' | 'left' | 'right'
 
 export type Rarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary'
 
+/**
+ * Physical size class — drives ambient-school sprite scale AND the
+ * frenzy choreography:
+ *   tiny/small  → surface dance, stand on tail, hop with the beat
+ *   medium      → swim up to the shallow lane and sway, no standing
+ *   large/huge  → stay submerged at their natural depth, bob up/down
+ *                 vertically with each beat (too big to leap)
+ */
+export type FishSize = 'tiny' | 'small' | 'medium' | 'large' | 'huge'
+
+/**
+ * Silhouette shape — picked separately from size so e.g. a `large
+ * torpedo` (tuna) and a `large flat` (ray) read very differently
+ * even though both occupy the same vertical lane.
+ */
+export type FishBodyShape =
+  | 'slim'     // sardine, mackerel — thin streamlined oval
+  | 'torpedo'  // tuna, swordfish — muscular long oval + crescent tail
+  | 'round'    // moonfish, pufferfish — disc/circle body
+  | 'chunky'   // anglerfish — wide ugly body with big mouth
+  | 'tentacle' // krakenling — body plus drooping arms
+  | 'flat'     // ray — wide flat kite with trailing whip tail
+  | 'arrow'    // shrimp/krill — small segmented arrow with antennae
+  | 'bell'     // jellyfish — translucent dome with hanging strands
+
 export interface FishDef {
   id: string
   i18nKey: string
   rarity: Rarity
+  /** Physical scale tier — drives sprite size + frenzy choreography. */
+  size: FishSize
+  /** Silhouette family — drives drawFish() rendering branch. */
+  bodyShape: FishBodyShape
   /** Score base when caught at calm weather. */
   baseScore: number
   /** 0..1 multiplier on hooked-window strictness. */

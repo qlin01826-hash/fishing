@@ -123,8 +123,29 @@
     <div class="title">请将手机横屏</div>
     <div class="sub">Fishing Penguin 需要横屏体验更好。<br>Rotate your phone to landscape.</div>
   </div>
-  <script type="module" src="../game/client/main.ts"></script>
+  <script type="module" src="./main-entry.ts"></script>
   <script>
+    // Fail-safe: if main.ts module never sets __GAME_BOOT__ within 8s,
+    // something went wrong loading the bundle (most common: opening the
+    // built index.html directly via file:// instead of through a server,
+    // or a JS syntax error in a chunk). Show a clear message instead of
+    // a perpetual spinner.
+    setTimeout(function() {
+      if (window.__GAME_BOOT__) return;
+      var screen = document.getElementById('loading-screen');
+      if (!screen) return;
+      screen.innerHTML = ''
+        + '<div style="max-width: 90%; padding: 20px; color: #ffd166; font-family: monospace; font-size: 13px; text-align: left;">'
+        + '<div style="font-size: 16px; margin-bottom: 12px; color: #ff8080;">&#9888; Game JS bundle never started</div>'
+        + '<div style="line-height: 1.6;">'
+        + 'Most likely causes:'
+        + '<ul style="padding-left: 20px; margin: 8px 0;">'
+        + '<li>You opened <code>index.html</code> directly via <code>file://</code> &mdash; ES modules require an HTTP server. Run <code>pnpm web:dev</code> or use the single-file <code>dist-standalone/index.html</code>.</li>'
+        + '<li>A chunk failed to download &mdash; open DevTools &rarr; Network tab and reload.</li>'
+        + '<li>A JS syntax error in the bundle &mdash; check DevTools Console for red errors.</li>'
+        + '</ul></div></div>';
+    }, 8000);
+
     window.addEventListener('load', () => document.body.focus());
     document.addEventListener('click', () => document.body.focus());
     // iOS Safari: prevent rubber-band scroll

@@ -39,11 +39,16 @@
     "double": "现在钓上来双倍奖励！(>o<)"
   },
   "fish": {
+    "shrimp": "小虾",
     "sardine": "沙丁鱼",
     "mackerel": "鲭鱼",
-    "tuna": "金枪鱼",
+    "pufferfish": "河豚",
+    "jellyfish": "水母",
     "anglerfish": "鮟鱇鱼",
     "krakenling": "小克拉肯",
+    "tuna": "金枪鱼",
+    "swordfish": "剑鱼",
+    "ray": "魟鱼",
     "moonfish": "月之鱼",
     "rarityCommon": "普通",
     "rarityUncommon": "稀有",

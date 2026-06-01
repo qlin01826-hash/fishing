@@ -21,13 +21,99 @@
  * For path-prefix hosts (e.g. GitHub Pages under `/repo/`):
  *
  *   cross-env VITE_BASE=/repo/ pnpm exec vite build --config web/vite.config.ts
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ *  STANDALONE single-file mode
+ * ─────────────────────────────────────────────────────────────────────────
+ * Set the `STANDALONE` env var to produce a single self-contained
+ * `web/dist-standalone/index.html` that bundles JS + CSS + assets inline,
+ * so it can be opened directly with `file://` (double-click) and shared
+ * as a single attachment.
+ *
+ *   PowerShell:  $env:STANDALONE='1'; pnpm exec vite build --config web/vite.config.ts
+ *   cmd.exe:     set STANDALONE=1 && pnpm exec vite build --config web/vite.config.ts
  */
 import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { defineConfig } from 'vite'
+import { viteSingleFile } from 'vite-plugin-singlefile'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
+
+const STANDALONE = !!process.env.STANDALONE
+
+// Legacy custom inline plugin kept for reference only — replaced by
+// the battle-tested `vite-plugin-singlefile` (used in `plugins` below).
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _legacyInlineSingleFilePlugin(): any {
+  return {
+    name: 'minigame:inline-single-file',
+    enforce: 'post',
+    generateBundle(_options, bundle) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[STANDALONE] inlining: ${Object.keys(bundle).join(', ')}`,
+      )
+      for (const htmlKey of Object.keys(bundle)) {
+        const htmlAsset = bundle[htmlKey]
+        if (htmlAsset.type !== 'asset' || !htmlKey.endsWith('.html')) continue
+
+        let source = String(htmlAsset.source)
+        const inlinedKeys: string[] = []
+
+        for (const key of Object.keys(bundle)) {
+          const item = bundle[key]
+          const escKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+          if (item.type === 'asset' && key.endsWith('.css')) {
+            const css = String(item.source)
+            const linkRe = new RegExp(
+              `<link[^>]*?href=["']?[^"'>]*${escKey}["']?[^>]*?\\/?>`,
+              'g',
+            )
+            const before = source
+            source = source.replace(linkRe, `<style>\n${css}\n</style>`)
+            if (before !== source) inlinedKeys.push(key)
+          } else if (item.type === 'chunk' && key.endsWith('.js')) {
+            const closingMatches = item.code.match(/<\/script/gi) || []
+            const commentMatches = item.code.match(/<!--/g) || []
+            // eslint-disable-next-line no-console
+            console.log(
+              `[STANDALONE] ${key}: code length=${item.code.length}, ` +
+              `</script count=${closingMatches.length}, ` +
+              `<!-- count=${commentMatches.length}`,
+            )
+            const safe = item.code
+              .replace(/<\/script/gi, '<\\/script')
+              .replace(/<!--/g, '<\\!--')
+            // eslint-disable-next-line no-console
+            console.log(
+              `[STANDALONE] after escape: safe length=${safe.length}, ` +
+              `delta=${safe.length - item.code.length}`,
+            )
+            const scriptRe = new RegExp(
+              `<script[^>]*?src=["']?[^"'>]*${escKey}["']?[^>]*?>\\s*</script>`,
+              'g',
+            )
+            const before = source
+            source = source.replace(scriptRe, `<script type="module">\n${safe}\n</script>`)
+            if (before !== source) inlinedKeys.push(key)
+          }
+        }
+
+        // modulepreload hints reference chunks that no longer have their own file
+        source = source.replace(
+          /<link[^>]*?rel=["']?modulepreload["']?[^>]*?\/?>/g,
+          '',
+        )
+
+        htmlAsset.source = source
+        for (const k of inlinedKeys) delete bundle[k]
+      }
+    },
+  }
+}
 
 export default defineConfig({
   root: __dirname,
@@ -40,6 +126,17 @@ export default defineConfig({
     // imports without devtools — perfect for production.
     'import.meta.env.VITE_I18N_MODE': JSON.stringify(process.env.VITE_I18N_MODE ?? 'locked'),
   },
+  plugins: STANDALONE
+    ? [
+        viteSingleFile({
+          // Remove Vite's runtime `__vitePreload` polyfill — useless once
+          // every chunk is inlined, and it leaves stray `__VITE_PRELOAD__`
+          // identifiers in the bundle that can break parsing.
+          removeViteModuleLoader: true,
+          useRecommendedBuildConfig: true,
+        }),
+      ]
+    : [],
   resolve: {
     alias: [
       // Subpath aliases MUST come before their bare-name parents so they
@@ -69,23 +166,32 @@ export default defineConfig({
     cors: true,
   },
   build: {
-    outDir: resolve(__dirname, 'dist'),
+    outDir: STANDALONE
+      ? resolve(__dirname, 'dist-standalone')
+      : resolve(__dirname, 'dist'),
     emptyOutDir: true,
     sourcemap: false,
     target: 'ES2020',
     minify: 'esbuild',
-    cssCodeSplit: true,
-    assetsInlineLimit: 4096,
+    cssCodeSplit: !STANDALONE,
+    // In standalone mode we want everything (images, fonts, etc.) inlined.
+    assetsInlineLimit: STANDALONE ? 100_000_000_000 : 4096,
     rollupOptions: {
-      output: {
-        manualChunks: {
-          pixi: ['pixi.js'],
-        },
-        chunkFileNames: 'assets/[name]-[hash].js',
-        entryFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash].[ext]',
-      },
+      output: STANDALONE
+        ? {
+            inlineDynamicImports: true,
+            entryFileNames: 'assets/main.js',
+            assetFileNames: 'assets/[name][extname]',
+          }
+        : {
+            manualChunks: {
+              pixi: ['pixi.js'],
+            },
+            chunkFileNames: 'assets/[name]-[hash].js',
+            entryFileNames: 'assets/[name]-[hash].js',
+            assetFileNames: 'assets/[name]-[hash].[ext]',
+          },
     },
-    chunkSizeWarningLimit: 2000,
+    chunkSizeWarningLimit: STANDALONE ? 10_000 : 2000,
   },
 })

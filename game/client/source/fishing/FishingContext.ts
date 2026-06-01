@@ -7,6 +7,7 @@ import type { Penguin } from './entities/Penguin'
 import type { Hook } from './entities/Hook'
 import type { FishSchool } from './entities/FishSchool'
 import type { MermaidRock } from './entities/MermaidRock'
+import type { Whale } from './entities/Whale'
 import type { Hud } from './ui/Hud'
 import type { CastPreview } from './ui/CastPreview'
 import type { ReelButtons } from './ui/ReelButtons'
@@ -16,6 +17,7 @@ import type { PullPanel } from './ui/PullPanel'
 import type { EventOverlay } from './ui/EventOverlay'
 import type { CatchBanner } from './ui/CatchBanner'
 import type { NoteLane } from './ui/NoteLane'
+import type { FrenzyOverlay } from './ui/FrenzyOverlay'
 import type { HungerSystem } from './systems/HungerSystem'
 import type { WeatherSystem } from './systems/WeatherSystem'
 import type { AudioSystem } from './systems/AudioSystem'
@@ -38,6 +40,7 @@ export interface FishingContext {
   readonly hook: Hook
   readonly fishSchool: FishSchool
   readonly mermaidRock: MermaidRock
+  readonly whale: Whale
   // UI
   readonly hud: Hud
   readonly castPreview: CastPreview
@@ -48,6 +51,7 @@ export interface FishingContext {
   readonly eventOverlay: EventOverlay
   readonly catchBanner: CatchBanner
   readonly noteLane: NoteLane
+  readonly frenzyOverlay: FrenzyOverlay
   // Systems
   readonly hungerSystem: HungerSystem
   readonly weatherSystem: WeatherSystem

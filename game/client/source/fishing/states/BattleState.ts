@@ -58,8 +58,19 @@ export class BattleState implements IFishingState {
   private trackerT = 0.5
   /** Centre of the safe zone (0..1). Drifts slowly for visual interest. */
   private safeCenter = 0.5
-  /** Half-width of safe zone (0..1). */
+  /**
+   * Half-width of the safe zone (0..1). DYNAMIC: grows on perfect/good
+   * taps, shrinks on bad/miss. When it nears `safeHalfMax`, BattleState
+   * triggers a "Fish Frenzy" burst (faster willpower drain + score bonus
+   * + visual celebration). Players are rewarded for sustained rhythm.
+   */
   private safeHalf = 0.18
+  /** Baseline width set on enter, picked from def.strictness. */
+  private safeHalfBase = 0.18
+  /** Floor — zone can't shrink below this even on miss spam. */
+  private readonly safeHalfMin = 0.06
+  /** Ceiling — at this width frenzy fires. */
+  private readonly safeHalfMax = 0.48
   /** Time tracker has been outside safe zone (used for line-snap timer). */
   private outOfZoneMs = 0
   /** True while the fish is struggling (after 2 consecutive missed beats). */
@@ -68,6 +79,22 @@ export class BattleState implements IFishingState {
   private struggleDir = 1
   /** Saved binding to remove the pull-panel listener on exit. */
   private readonly pullListener: (j: TapJudgement, nowMs: number) => void
+
+  // --- Layer 1b: Fish Frenzy burst ---
+  /** True during the celebration window after the zone hits the ceiling. */
+  private frenzyActive = false
+  /** Beats remaining in the current frenzy. */
+  private frenzyBeatsLeft = 0
+  /** Once-per-frenzy guard so we don't re-trigger every frame at the cap. */
+  private frenzyArmed = true
+  /** Score awarded per frenzy beat (also paid out on tap during frenzy). */
+  private readonly frenzyScorePerBeat = 3
+  /** Last beat we paid out for, so the per-beat bonus doesn't double-count. */
+  private frenzyLastPaidBeat = -1
+  /** Minimum frenzy duration in beats (so a single peak still feels meaningful). */
+  private readonly frenzyMinBeats = 8
+  /** Cached auto-miss counter so we can detect FRESH misses each frame. */
+  private lastSeenAutoMisses = 0
 
   // --- Layer 2: willpower (enhanced beats + background drain) ---
   private willpower: number
@@ -78,6 +105,16 @@ export class BattleState implements IFishingState {
   private fishTargetX = 0
   private fishTargetY = 0
   private fishTargetTimer = 0
+
+  // --- Beat-synced "tug" (reel-in jerk) ---
+  /** Previous-frame beat phase for downbeat-edge detection. */
+  private tugPhasePrev = 0.5
+  /**
+   * Tug envelope 0..1. Snaps to 1 on each beat (sharp attack) and
+   * decays toward 0 between beats (release), so the hooked fish jerks
+   * toward the rod in time with the music and the line twangs taut.
+   */
+  private tugEnvelope = 0
 
   // --- Event scheduler ---
   private eventKind: EventKind = 'idle'
@@ -113,7 +150,8 @@ export class BattleState implements IFishingState {
     this.willpower = biter.def.willpower
     this.initialWillpower = biter.def.willpower
     this.followLocksLeft = biter.def.followLocks
-    this.safeHalf = Math.max(0.07, 0.18 - this.def.strictness * 0.1)
+    this.safeHalfBase = Math.max(0.08, 0.18 - this.def.strictness * 0.1)
+    this.safeHalf = this.safeHalfBase
     this.pullListener = (j, now) => this.onPullJudgement(j, now)
   }
 
@@ -161,11 +199,27 @@ export class BattleState implements IFishingState {
     // intro (2 bars) and the first half of the verse to lock into the
     // rhythm before being asked to react to anything special.
     this.nextEventInMs = 7500
+
+    // Reset frenzy / dynamic zone state so a previous battle's data
+    // can't leak in.
+    this.frenzyActive = false
+    this.frenzyBeatsLeft = 0
+    this.frenzyArmed = true
+    this.frenzyLastPaidBeat = -1
+    this.lastSeenAutoMisses = 0
+    this.ctx.frenzyOverlay.deactivate()
+    this.ctx.fishSchool.setFrenzyAmount(0)
+    this.ctx.tensionBar.setFrenzy(0, 1)
   }
 
   update(dtSeconds: number, _elapsedMs: number): void {
+    // Tug first so the fresh offset is ready when updateFish renders
+    // the fish via moveFish this same frame.
+    this.updateTug(dtSeconds)
     this.updateFish(dtSeconds)
     this.updateTension(dtSeconds)
+    this.updateSafeWidth(dtSeconds)
+    this.updateFrenzy(dtSeconds)
     this.ctx.pullPanel.update(dtSeconds, performance.now())
     this.processNoteLaneOutcomes()
     this.updateWillpowerBackground(dtSeconds)
@@ -209,6 +263,14 @@ export class BattleState implements IFishingState {
     this.ctx.eventOverlay.hide()
     this.ctx.audio.stopBeats()
     this.ctx.pullPanel.setStruggling(false)
+    // Drop the frenzy celebration immediately on exit so a stale
+    // overlay doesn't linger on the result banner / sailing scene.
+    this.frenzyActive = false
+    this.ctx.frenzyOverlay.deactivate()
+    this.ctx.fishSchool.setFrenzyAmount(0)
+    this.ctx.tensionBar.setFrenzy(0, 1)
+    this.ctx.whale.dismiss()
+    this.ctx.penguin.returnToBoat()
     // Tear down our binding so a stale battle instance can't keep
     // observing the (shared) PullPanel after we've exited.
     if (this.ctx.pullPanel.onJudgement === this.pullListener) {
@@ -241,11 +303,87 @@ export class BattleState implements IFishingState {
     const dy = (this.fishTargetY - this.ambient.y) * Math.min(1, dtSeconds * 3.5)
     this.ctx.fishSchool.moveFish(this.ambient, dx, dy)
     if (this.ctx.hook.getMode() === 'fight') {
-      const dxh = (this.ambient.x - this.ctx.hook.x) * Math.min(1, dtSeconds * 4)
-      const dyh = (this.ambient.y - this.ctx.hook.y) * Math.min(1, dtSeconds * 4)
-      this.ctx.hook.fightOffsetX += dxh
-      this.ctx.hook.fightOffsetY += dyh
+      // Track the fish's VISUAL position (swim + tug) so the bait stays
+      // attached as the fish jerks on the beat. Follow speed ramps up
+      // with the tug envelope so the hook snaps along with the lurch
+      // instead of lagging behind and leaving a gap.
+      const targetX = this.ambient.x + this.ambient.tugX
+      const targetY = this.ambient.y + this.ambient.tugY
+      const follow = Math.min(1, dtSeconds * (4 + this.tugEnvelope * 20))
+      this.ctx.hook.fightOffsetX += (targetX - this.ctx.hook.x) * follow
+      this.ctx.hook.fightOffsetY += (targetY - this.ctx.hook.y) * follow
     }
+  }
+
+  /**
+   * Beat-synced "reel-in tug". On every beat the hooked fish gets a
+   * sharp visual jerk toward the rod tip and the fishing line snaps
+   * taut + twangs, then both ease back before the next beat. This is
+   * the headline "拉拽" feedback: the fight visibly pulses with the
+   * soundtrack.
+   *
+   * Magnitude scales with how well the player is doing — a strong, in-
+   * zone reel yanks harder, a frenzy yanks hardest, and a stubborn
+   * high-fight-strength fish resists (smaller jerk). The effect is
+   * purely cosmetic (offsets the graphic, never the fight state), so
+   * it can't unbalance the catch math.
+   */
+  private updateTug(dtSeconds: number): void {
+    if (!this.ambient || this.ctx.hook.getMode() !== 'fight') {
+      this.tugEnvelope = 0
+      this.ctx.hook.setLineTension(0)
+      return
+    }
+
+    const phase = this.ctx.beatClock.started
+      ? this.ctx.beatClock.phase(performance.now())
+      : 0.5
+    // Downbeat edge: prev was late in the beat, now we've wrapped to
+    // the start. Also fire on a backwards phase jump (dropped frames).
+    const isBeat =
+      (this.tugPhasePrev > 0.6 && phase < 0.4) ||
+      phase < this.tugPhasePrev - 0.5
+    if (isBeat) {
+      this.tugEnvelope = 1
+    }
+    this.tugPhasePrev = phase
+    // Sharp attack (set to 1 above) + exponential-ish release (~0.2s).
+    this.tugEnvelope = Math.max(0, this.tugEnvelope - dtSeconds * 5)
+    const env = this.tugEnvelope
+
+    // Direction from the fish toward the rod tip (where it's being
+    // reeled). Falls back to "straight up" if the fish is right on the
+    // tip for some reason.
+    const rodX = this.ctx.boat.rodTipX
+    const rodY = this.ctx.boat.rodTipY
+    const dx = rodX - this.ambient.x
+    const dy = rodY - this.ambient.y
+    const dist = Math.hypot(dx, dy)
+    const nx = dist > 1 ? dx / dist : 0
+    const ny = dist > 1 ? dy / dist : -1
+
+    // In-zone reeling tugs harder; off-zone is a weaker token jerk.
+    const inZone =
+      this.trackerT >= this.safeCenter - this.safeHalf &&
+      this.trackerT <= this.safeCenter + this.safeHalf
+    const zoneMul = inZone ? 1 : 0.45
+    const frenzyMul = this.frenzyActive ? 1.6 : 1
+    // Strong fish resist the pull (move less per yank).
+    const resist = 1 - this.def.fightStrength * 0.4
+    const amount = 18 * zoneMul * frenzyMul * resist
+
+    // Directional yank toward the rod + a high-frequency thrash so the
+    // fish looks like it's fighting the line, not gliding.
+    const thrash = Math.sin(performance.now() * 0.05) * env * 0.22
+    this.ctx.fishSchool.setFishTug(
+      this.ambient,
+      nx * env * amount,
+      ny * env * amount,
+      thrash,
+    )
+    // Drive the line taut in lockstep so the whole rod→hook→fish chain
+    // reads as one rhythmic pull.
+    this.ctx.hook.setLineTension(env * (0.5 + 0.5 * zoneMul))
   }
 
   /**
@@ -260,6 +398,10 @@ export class BattleState implements IFishingState {
     const tired = 1 - this.willpower / this.initialWillpower
     const targetCenter = 0.5 + Math.sin(performance.now() * 0.0006) * 0.22 * (1 - tired * 0.5)
     this.safeCenter += (targetCenter - this.safeCenter) * Math.min(1, dtSeconds * 0.6)
+    // Keep the zone fully on-screen even when it's nearly full-width.
+    const margin = this.safeHalf
+    if (this.safeCenter < margin) this.safeCenter = margin
+    if (this.safeCenter > 1 - margin) this.safeCenter = 1 - margin
 
     if (this.struggling) {
       // Constant push away from safe centre, scaled by fight strength.
@@ -303,24 +445,48 @@ export class BattleState implements IFishingState {
       // events, etc.) — playing in rhythm is what matters.
       this.ctx.noteLane.consecutiveAutoMisses = 0
       this.clearStruggle()
+      // Reward: zone grows. Bigger zone = easier to stay in.
+      this.growSafeHalf(0.040)
+      // Frenzy bonus: each perfect tap during frenzy pays out extra
+      // willpower damage + score (the player feels they're shredding).
+      if (this.frenzyActive) {
+        this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.010)
+        this.ctx.addScore(2)
+      }
     } else if (judgement === 'good') {
       this.trackerT += toCenter * 0.28
       this.ctx.noteLane.consecutiveAutoMisses = 0
       this.clearStruggle()
+      this.growSafeHalf(0.018)
+      if (this.frenzyActive) {
+        this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.006)
+        this.ctx.addScore(1)
+      }
     } else {
       // Explicit off-beat tap: tiny shove away, no struggle escalation
       // (auto-misses on missed BEATS are the canonical struggle trigger).
       this.trackerT -= Math.sign(toCenter) * 0.04
       this.ctx.shake(4, 0.12)
+      this.shrinkSafeHalf(0.025)
     }
   }
 
   /**
    * Pull-side bookkeeping for note auto-misses. Two in a row triggers
-   * the struggle state until the next successful hit.
+   * the struggle state until the next successful hit. Each new auto-
+   * miss also shrinks the safe zone (same penalty schedule as an
+   * explicit bad tap) so passive players don't passively keep frenzy.
    */
   private processNoteLaneOutcomes(): void {
-    if (!this.struggling && this.ctx.noteLane.consecutiveAutoMisses >= 2) {
+    const currentMisses = this.ctx.noteLane.consecutiveAutoMisses
+    if (currentMisses > this.lastSeenAutoMisses) {
+      const delta = currentMisses - this.lastSeenAutoMisses
+      // Each fresh auto-miss is slightly less harsh than a bad TAP.
+      this.shrinkSafeHalf(0.015 * delta)
+    }
+    this.lastSeenAutoMisses = currentMisses
+
+    if (!this.struggling && currentMisses >= 2) {
       this.struggling = true
       this.struggleDir = Math.sign(this.trackerT - this.safeCenter) || (Math.random() < 0.5 ? -1 : 1)
       this.ctx.pullPanel.setStruggling(true)
@@ -362,8 +528,151 @@ export class BattleState implements IFishingState {
       // Enhanced-beat successes (handled below) shave another ~40-50%
       // off the floor, so realistic battles land at 25-45s.
       const drainPerSec = this.initialWillpower * (0.025 - this.def.strictness * 0.012)
-      this.willpower -= drainPerSec * dtSeconds
+      // Fish Frenzy: in-zone drain runs at 3× while the burst is active
+      // so the player visibly burns through stamina during the window.
+      const mult = this.frenzyActive ? 3 : 1
+      this.willpower -= drainPerSec * dtSeconds * mult
     }
+  }
+
+  // ---- Layer 1b: dynamic safe-zone width + Fish Frenzy ----
+
+  /** Grow the safe zone (player reward). Snaps at `safeHalfMax`. */
+  private growSafeHalf(delta: number): void {
+    this.safeHalf = Math.min(this.safeHalfMax, this.safeHalf + delta)
+  }
+
+  /** Shrink the safe zone (penalty). Clamped at `safeHalfMin`. */
+  private shrinkSafeHalf(delta: number): void {
+    this.safeHalf = Math.max(this.safeHalfMin, this.safeHalf - delta)
+  }
+
+  /**
+   * Per-beat passive decay on the safe zone width — keeps the player
+   * actively engaged. Without this, a single perfect streak could buy
+   * a permanently large zone with no follow-up effort.
+   *
+   * The decay is **paused during frenzy** (the burst should feel rich
+   * and stable) and is much weaker than gain so a competent player
+   * still trends upward.
+   */
+  private updateSafeWidth(_dtSeconds: number): void {
+    if (this.frenzyActive) return
+    const beat = this.ctx.beatClock.currentBeat()
+    if (beat === this.lastSeenBeat) return
+    // (decay actually happens via updateMusicIntensityDecay which also
+    // tracks beat ticks — we piggy-back on its delta here so we don't
+    // need a second beat-tracker.)
+    const delta = beat - this.lastSeenBeat
+    if (delta > 0) {
+      this.shrinkSafeHalf(0.008 * delta)
+    }
+  }
+
+  /**
+   * Frenzy lifecycle: arm/trigger/maintain/end + drive the visual
+   * overlays each frame.
+   */
+  private updateFrenzy(dtSeconds: number): void {
+    const ratio = this.safeHalf / this.safeHalfMax
+
+    // ARM/TRIGGER: zone reached the ceiling and the previous burst has
+    // already ended (so we don't re-fire on every frame at the cap).
+    if (!this.frenzyActive && this.frenzyArmed && ratio >= 0.95) {
+      this.startFrenzy()
+    }
+
+    // MAINTAIN: tick down beats; pay out the per-beat score bonus once
+    // per integer beat advance.
+    if (this.frenzyActive) {
+      const beat = this.ctx.beatClock.currentBeat()
+      if (beat !== this.frenzyLastPaidBeat) {
+        if (this.frenzyLastPaidBeat >= 0) {
+          const beatsAdvanced = Math.max(0, beat - this.frenzyLastPaidBeat)
+          this.frenzyBeatsLeft = Math.max(0, this.frenzyBeatsLeft - beatsAdvanced)
+          this.ctx.addScore(this.frenzyScorePerBeat * beatsAdvanced)
+        }
+        this.frenzyLastPaidBeat = beat
+      }
+      // END: either we ran out of beats AND the player let the zone
+      // collapse, OR the zone has dropped well below the cap regardless
+      // of beats. Brief grace either way so a single tap-miss can't
+      // immediately yank the celebration.
+      const beatsExhausted = this.frenzyBeatsLeft <= 0
+      const zoneCollapsed = this.safeHalf < this.safeHalfMax * 0.55
+      if (beatsExhausted && zoneCollapsed) {
+        this.endFrenzy()
+      }
+    }
+
+    // OVERLAY/UI: drive the frenzy intensity into the cosmetic layers
+    // each frame so transitions stay smooth even when frenzy itself
+    // ticks on integer beats. FrenzyOverlay's own .update() is driven
+    // centrally by FishingScene so its exit animation can finish even
+    // after BattleState has torn down.
+    const targetT = this.frenzyActive ? 1 : Math.max(0, (ratio - 0.55) / 0.45) * 0.4
+    this.ctx.tensionBar.setFrenzy(targetT, dtSeconds)
+    this.ctx.fishSchool.setFrenzyAmount(this.frenzyActive ? 1 : targetT * 0.3)
+    // Pipe BeatClock phase to the school so all the fish wag together.
+    this.ctx.fishSchool.setBeatPhase(
+      this.ctx.beatClock.started ? this.ctx.beatClock.phase(performance.now()) : 0.5,
+    )
+    // Keep the penguin's swim orbit centred on the boat as it bobs.
+    if (this.frenzyActive) {
+      const boatX = this.ctx.boat.deckCenterX
+      const orbitY = this.ctx.viewport.waterLineY + 28
+      const rx = Math.min(140, this.ctx.viewport.width * 0.18)
+      const ry = Math.min(40, this.ctx.viewport.height * 0.07)
+      this.ctx.penguin.swimAroundBoat(boatX, orbitY, rx, ry)
+    }
+  }
+
+  private startFrenzy(): void {
+    this.frenzyActive = true
+    this.frenzyArmed = false
+    this.frenzyBeatsLeft = this.frenzyMinBeats
+    this.frenzyLastPaidBeat = this.ctx.beatClock.currentBeat()
+    // Audio: push intensity up two layers so the chorus opens up
+    // around the player.
+    const lvl = this.ctx.audio.bumpMusicIntensity()
+    this.ctx.audio.bumpMusicIntensity()
+    this.ctx.noteLane.setIntensity(Math.max(lvl, this.ctx.audio.getMusicIntensity()))
+    this.ctx.audio.playPerfectChime()
+    this.ctx.frenzyOverlay.activate()
+    this.ctx.shake(5, 0.35)
+
+    // Spectacle: more fish, a guest whale, and the penguin dives in
+    // to swim around the boat.
+    this.ctx.fishSchool.triggerFrenzyBurst(12)
+    this.ctx.whale.appear(this.ctx.viewport)
+    // Orbit centred on the boat, sitting just below the waterline so
+    // the penguin clearly dives INTO the sea instead of running laps
+    // on top of it. Radii scale to viewport so it stays in-frame even
+    // on small phones.
+    const boatX = this.ctx.boat.deckCenterX
+    const orbitY = this.ctx.viewport.waterLineY + 28
+    const rx = Math.min(140, this.ctx.viewport.width * 0.18)
+    const ry = Math.min(40, this.ctx.viewport.height * 0.07)
+    this.ctx.penguin.swimAroundBoat(boatX, orbitY, rx, ry)
+    // Penguin can't contain its excitement — star eyes for the duration
+    // of the frenzy. We don't bother restoring it here; SailingState
+    // re-picks a mood based on hunger as soon as the battle resolves.
+    this.ctx.penguin.setMood('excited')
+  }
+
+  private endFrenzy(): void {
+    this.frenzyActive = false
+    this.frenzyBeatsLeft = 0
+    // Reset zone to a high but achievable value so the player has to
+    // re-earn the next burst, not coast on residual width.
+    this.safeHalf = Math.min(this.safeHalf, this.safeHalfMax * 0.55)
+    this.ctx.frenzyOverlay.deactivate()
+    // Re-arm so the next time the player drives the zone back up to the
+    // ceiling, another frenzy fires.
+    this.frenzyArmed = true
+    // Send the cameo cast home.
+    this.ctx.whale.dismiss()
+    this.ctx.penguin.returnToBoat()
   }
 
   private updateEvents(dtSeconds: number): void {
@@ -589,7 +898,9 @@ export class BattleState implements IFishingState {
   private snap(): void {
     this.ctx.audio.playFail()
     this.ctx.shake(14, 0.6)
-    this.ctx.penguin.showMessage(t('game.tensionBroken'), 'sad', 1800)
+    // Worried takes over right as the line snaps — sweat-drop emotes
+    // sell the panic better than the previous flat sadness.
+    this.ctx.penguin.showMessage(t('game.tensionBroken'), 'worried', 1800)
     this.ctx.mermaidRock.hide()
     this.ctx.activeBiter = null
     this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)

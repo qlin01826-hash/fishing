@@ -40,6 +40,14 @@ export class MermaidRock {
   private readonly mouth = new Graphics()
   private readonly notesLayer = new Container()
   private readonly aura = new Graphics()
+  /**
+   * Dedicated moonlight halo — wider and cooler than the singing aura,
+   * always-on whenever night strength is non-zero. Drawn BEHIND the
+   * regular aura so the aura's warm pulse stacks on top.
+   */
+  private readonly moonAura = new Graphics()
+  /** 0..1 lerped strength of the moonlight aura. */
+  private moonlight = 0
 
   /** Floating ♪ notes currently in flight. */
   private notes: FloatingNote[] = []
@@ -56,6 +64,7 @@ export class MermaidRock {
 
   constructor() {
     this.container.addChild(
+      this.moonAura,
       this.aura,
       this.rock,
       this.tailBack,
@@ -108,6 +117,16 @@ export class MermaidRock {
     return this.state !== 'hidden'
   }
 
+  /**
+   * Set the desired moonlight intensity (0 = no glow, 1 = full moon).
+   * The actual rendered value is lerped each frame so the lighting
+   * eases in/out smoothly as the day cycle rotates.
+   */
+  setMoonlight(target: number): void {
+    this.moonlightTarget = Math.max(0, Math.min(1, target))
+  }
+  private moonlightTarget = 0
+
   update(dtSeconds: number): void {
     // Slide animation
     if (this.state === 'entering') {
@@ -142,6 +161,18 @@ export class MermaidRock {
       this.drawAura(intensity)
     } else {
       this.drawAura(0)
+    }
+    // Moonlight aura: lerps toward the latched target and is drawn
+    // even when she's off-screen (it'll fade out smoothly that way
+    // too). The visible-only bail-out is unnecessary because an empty
+    // graphics costs almost nothing.
+    this.moonlight += (this.moonlightTarget - this.moonlight) * Math.min(1, dtSeconds * 1.5)
+    if (this.state !== 'hidden' && this.moonlight > 0.01) {
+      // Subtle slow breath stacked on top of the time-of-day fade.
+      const breath = 0.85 + 0.15 * Math.sin(this.auraPhase * 0.6)
+      this.drawMoonAura(this.moonlight * breath)
+    } else {
+      this.moonAura.clear()
     }
 
     // Singing — mouth pulses + notes spawn.
@@ -373,6 +404,36 @@ export class MermaidRock {
     g.fill({ color: 0x8fe3f4, alpha: 0.08 + intensity * 0.12 })
     g.circle(0, -52, 24 + intensity * 6)
     g.fill({ color: 0xfff5e0, alpha: 0.05 + intensity * 0.08 })
+  }
+
+  /**
+   * Wide cool halo behind everything — reads as "moonlight pooling
+   * around her on the rock". Three stacked discs of decreasing radius
+   * and increasing alpha give a soft falloff, and a slim rim-light
+   * arc behind the head highlights her silhouette against the night.
+   */
+  private drawMoonAura(intensity: number): void {
+    const g = this.moonAura
+    g.clear()
+    if (intensity <= 0.01) return
+    // Body-centred halo discs (negative-Y because the body sits ABOVE
+    // the rock origin at roughly y=-50).
+    const cx = 0
+    const cy = -46
+    g.circle(cx, cy, 88)
+    g.fill({ color: 0xa8c7ff, alpha: 0.05 * intensity })
+    g.circle(cx, cy, 62)
+    g.fill({ color: 0xc6dcff, alpha: 0.08 * intensity })
+    g.circle(cx, cy, 42)
+    g.fill({ color: 0xe8f0ff, alpha: 0.11 * intensity })
+    // Rim light behind the head — a thin crescent above the face.
+    g.arc(0, -60, 12, Math.PI + 0.2, 2 * Math.PI - 0.2)
+    g.stroke({ color: 0xffffff, width: 2, alpha: 0.4 * intensity })
+    // Subtle rim on the tail flick too.
+    g.moveTo(36, -8)
+    g.lineTo(54, -22)
+    g.lineTo(50, 0)
+    g.stroke({ color: 0xc6dcff, width: 1.5, alpha: 0.35 * intensity })
   }
 
   private spawnNote(): void {

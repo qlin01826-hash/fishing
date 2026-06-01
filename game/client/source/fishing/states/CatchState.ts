@@ -62,11 +62,40 @@ export class CatchState implements IFishingState {
     // Wipe the old commission off the persistent channel before showing
     // the cheer — SailingState will refill it with the next request.
     this.ctx.penguin.hideBubble()
-    this.ctx.penguin.showMessage(
-      commissionFulfilled ? t('penguin.happy') : t('penguin.neutral'),
-      commissionFulfilled ? 'happy' : 'neutral',
-      2200,
-    )
+    // Pick a richer reaction mood based on what we actually caught.
+    // Legendary lands earn a love-eyes "♥" cheer, epic earns a proud
+    // smug grin, ordinary commissioned catches stay happy, and
+    // off-commission catches (player ignored the request) get a
+    // dispassionate neutral.
+    let cheerMood: 'love' | 'proud' | 'happy' | 'neutral'
+    let cheerText: string
+    if (commissionFulfilled && this.def.rarity === 'legendary') {
+      cheerMood = 'love'
+      cheerText = t('penguin.happy')
+    } else if (commissionFulfilled && this.def.rarity === 'epic') {
+      cheerMood = 'proud'
+      cheerText = t('penguin.happy')
+    } else if (commissionFulfilled) {
+      cheerMood = 'happy'
+      cheerText = t('penguin.happy')
+    } else {
+      cheerMood = 'neutral'
+      cheerText = t('penguin.neutral')
+    }
+    this.ctx.penguin.showMessage(cheerText, cheerMood, 2200)
+    // Catch-celebration jump. Height scales with fish size so the
+    // penguin clearly *reacts* to a big haul: a tiny shrimp gets a
+    // small hop, a huge sea creature launches the penguin off the
+    // deck. The hooked surprise was the inhale — this is the payoff.
+    const size = this.def.size
+    let jumpHeight = 10
+    if (size === 'large') jumpHeight = 26
+    else if (size === 'huge') jumpHeight = 42
+    else if (size === 'medium') jumpHeight = 16
+    // Legendary lands get an extra springboard regardless of size so
+    // the moment always feels climactic.
+    if (this.def.rarity === 'legendary') jumpHeight += 10
+    this.ctx.penguin.triggerJump(jumpHeight, 0.55)
     this.ctx.commissionFish = null
     this.ctx.activeBiter = null
     this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)

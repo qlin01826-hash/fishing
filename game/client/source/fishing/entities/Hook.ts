@@ -49,6 +49,13 @@ export class Hook {
   private splashTimer = 0
   /** Subtle bobber jitter, randomised each frame in water. */
   private wiggle = 0
+  /**
+   * Line tautness 0..1, set by BattleState from the beat-synced "tug"
+   * envelope. 0 = the usual slack sag curve; 1 = the line snaps nearly
+   * straight and twangs. Lets the fishing line visibly react in rhythm
+   * as the fish is reeled in.
+   */
+  private lineTension = 0
   /** Externally-applied per-frame nudge during the fight (px, world). */
   fightOffsetX = 0
   fightOffsetY = 0
@@ -64,7 +71,16 @@ export class Hook {
     if (mode === 'flight' || mode === 'idle') {
       this.bubbles.clear()
       this.trail.length = 0
+      this.lineTension = 0
     }
+  }
+
+  /**
+   * 0 = slack line (default sag curve), 1 = line snapped taut + twang.
+   * BattleState drives this from its per-beat tug envelope.
+   */
+  setLineTension(amount: number): void {
+    this.lineTension = Math.max(0, Math.min(1, amount))
   }
 
   getMode(): HookMode {
@@ -83,6 +99,7 @@ export class Hook {
     this.splash.alpha = 0
     this.trail.length = 0
     this.bubbles.clear()
+    this.lineTension = 0
     this.mode = 'idle'
   }
 
@@ -241,16 +258,30 @@ export class Hook {
   private drawLine(): void {
     const g = this.line
     g.clear()
-    // Slack sag curve via quadratic through a midpoint dropped by some amount.
-    const midX = (this.rodTipX + this.x) / 2
     const dx = this.x - this.rodTipX
     const dy = this.y - this.rodTipY
     const len = Math.hypot(dx, dy)
-    const sag = Math.min(40, len * 0.08 + 6)
-    const midY = (this.rodTipY + this.y) / 2 + sag
+    // Slack sag curve via quadratic through a dropped midpoint. Tension
+    // pulls the sag out so the line snaps progressively straight.
+    const baseSag = Math.min(40, len * 0.08 + 6)
+    const sag = baseSag * (1 - this.lineTension * 0.85)
+    let midX = (this.rodTipX + this.x) / 2
+    let midY = (this.rodTipY + this.y) / 2 + sag
+    // Twang: when taut, vibrate the control point PERPENDICULAR to the
+    // line so it reads as a plucked string shuddering under load.
+    if (this.lineTension > 0.05 && len > 1) {
+      const perpX = -dy / len
+      const perpY = dx / len
+      const twang = Math.sin(this.wiggle * 90) * this.lineTension * 4
+      midX += perpX * twang
+      midY += perpY * twang
+    }
     g.moveTo(this.rodTipX, this.rodTipY)
     g.quadraticCurveTo(midX, midY, this.x, this.y)
-    g.stroke({ color: 0xffffff, width: 1.2, alpha: 0.6 })
+    // Taut line reads brighter + a touch thicker, like it's straining.
+    const width = 1.2 + this.lineTension * 0.8
+    const alpha = 0.6 + this.lineTension * 0.35
+    g.stroke({ color: 0xffffff, width, alpha })
   }
 
   private drawSplash(viewport: ViewportContext): void {

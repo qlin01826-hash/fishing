@@ -11,6 +11,11 @@ import { Penguin } from './entities/Penguin'
 import { Hook } from './entities/Hook'
 import { FishSchool } from './entities/FishSchool'
 import { MermaidRock } from './entities/MermaidRock'
+import { Whale } from './entities/Whale'
+import { SkyLayer } from './entities/SkyLayer'
+import { HorizonLayer } from './entities/HorizonLayer'
+import { ForegroundProps } from './entities/ForegroundProps'
+import { FogLayer } from './entities/FogLayer'
 
 import { Hud } from './ui/Hud'
 import { CastPreview } from './ui/CastPreview'
@@ -21,9 +26,11 @@ import { PullPanel } from './ui/PullPanel'
 import { EventOverlay } from './ui/EventOverlay'
 import { CatchBanner } from './ui/CatchBanner'
 import { NoteLane } from './ui/NoteLane'
+import { FrenzyOverlay } from './ui/FrenzyOverlay'
 
 import { HungerSystem } from './systems/HungerSystem'
 import { WeatherSystem } from './systems/WeatherSystem'
+import { TimeOfDaySystem } from './systems/TimeOfDaySystem'
 import { AudioSystem } from './systems/AudioSystem'
 import { PointerTracker } from './systems/PointerTracker'
 import { BeatClock } from './systems/BeatClock'
@@ -67,6 +74,11 @@ export class FishingScene implements GameScene {
   private readonly hook: Hook
   private readonly fishSchool: FishSchool
   private readonly mermaidRock: MermaidRock
+  private readonly whale: Whale
+  private readonly skyLayer: SkyLayer
+  private readonly horizonLayer: HorizonLayer
+  private readonly foregroundProps: ForegroundProps
+  private readonly fogLayer: FogLayer
 
   // UI
   private readonly hud: Hud
@@ -78,10 +90,12 @@ export class FishingScene implements GameScene {
   private readonly eventOverlay: EventOverlay
   private readonly catchBanner: CatchBanner
   private readonly noteLane: NoteLane
+  private readonly frenzyOverlay: FrenzyOverlay
 
   // Systems
   private readonly hungerSystem = new HungerSystem()
   private readonly weatherSystem = new WeatherSystem()
+  private readonly timeOfDay = new TimeOfDaySystem()
   private readonly audio = new AudioSystem()
   private readonly pointer = new PointerTracker()
   private readonly beatClock = new BeatClock()
@@ -116,6 +130,11 @@ export class FishingScene implements GameScene {
     this.hook = new Hook()
     this.fishSchool = new FishSchool(this.viewport)
     this.mermaidRock = new MermaidRock()
+    this.whale = new Whale()
+    this.skyLayer = new SkyLayer(this.viewport)
+    this.horizonLayer = new HorizonLayer(this.viewport)
+    this.foregroundProps = new ForegroundProps(this.viewport)
+    this.fogLayer = new FogLayer(this.viewport)
 
     this.hud = new Hud()
     this.castPreview = new CastPreview(this.viewport)
@@ -126,6 +145,7 @@ export class FishingScene implements GameScene {
     this.eventOverlay = new EventOverlay()
     this.catchBanner = new CatchBanner()
     this.noteLane = new NoteLane()
+    this.frenzyOverlay = new FrenzyOverlay()
 
     // Wire the BeatClock into the rhythm-dependent layers. The clock
     // itself stays dormant (returning sentinel values) until the audio
@@ -142,14 +162,48 @@ export class FishingScene implements GameScene {
     this.rootContainer.addChild(this.uiContainer)
     this.rootContainer.addChild(this.topUiContainer)
 
-    this.skyContainer.addChild(this.ocean.container)
+    // SKY backdrop, painted back-to-front so distance reads correctly:
+    //   1. ocean.backLayer    – sky gradient + underwater gradient
+    //   2. horizonLayer       – distant mountains + passing islands
+    //   3. skyLayer           – sun, drifting clouds, seagull flocks
+    //   4. ocean.frontLayer   – wave ribbons, rain, lightning flash
+    // Putting horizon + clouds BETWEEN ocean's back and front layers
+    // means crests of nearby waves visibly cover the base of the
+    // distant mountain silhouette — the way a real horizon does.
+    this.skyContainer.addChild(this.ocean.backLayer)
+    this.skyContainer.addChild(this.horizonLayer.container)
+    this.skyContainer.addChild(this.skyLayer.container)
+    this.skyContainer.addChild(this.ocean.frontLayer)
+
+    // Whale sits BEHIND the fish school so the fish always visibly
+    // swim in front of the much bigger silhouette.
+    this.underWaterContainer.addChild(this.whale.container)
     this.underWaterContainer.addChild(this.fishSchool.container)
     this.underWaterContainer.addChild(this.hook.container)
+    // Surface splashes live in the ABOVE-water layer (in front of the
+    // waves/foam) but BEFORE the mermaid/boat so the boat hull always
+    // sits on top of any splash trail.
+    this.aboveWaterContainer.addChild(this.fishSchool.splashContainer)
+    // Whale spout — also above water, alongside splash particles, so
+    // the column visibly punches above the wave line.
+    this.aboveWaterContainer.addChild(this.whale.spoutContainer)
+    // Foreground props (passing reefs, buoys, driftwood) — closer to
+    // camera than the horizon islands, so they sit ABOVE the wave
+    // ribbons but BEHIND the boat / mermaid so a buoy never visually
+    // jumps in front of the hull as it drifts past.
+    this.aboveWaterContainer.addChild(this.foregroundProps.container)
     // Mermaid sits in front of the ocean but behind the boat/penguin so
     // the boat visibly passes IN FRONT of her rock during enhanced beats.
     this.aboveWaterContainer.addChild(this.mermaidRock.container)
+    // Boat foam wake — drawn BEFORE the boat so the hull occludes the
+    // leading edge of the trail. World-space, not parented to the boat.
+    this.aboveWaterContainer.addChild(this.boat.wakeContainer)
     this.aboveWaterContainer.addChild(this.boat.container)
     this.aboveWaterContainer.addChild(this.penguin.container)
+    // Sea fog sits ON TOP of everything in the above-water layer so it
+    // visibly muffles the boat/mermaid silhouettes during a heavy
+    // storm or a deep-night run.
+    this.aboveWaterContainer.addChild(this.fogLayer.container)
 
     this.uiContainer.addChild(this.castPreview.container)
     this.uiContainer.addChild(this.reelButtons.container)
@@ -163,6 +217,10 @@ export class FishingScene implements GameScene {
     this.topUiContainer.addChild(this.tensionBar.container)
     this.topUiContainer.addChild(this.eventOverlay.container)
     this.topUiContainer.addChild(this.hud.container)
+    // FrenzyOverlay sits BETWEEN the normal HUD and the catch banner so
+    // its vignette/banner are visible on top of the playfield but the
+    // post-catch result banner still slides in over the top.
+    this.topUiContainer.addChild(this.frenzyOverlay.container)
     this.topUiContainer.addChild(this.catchBanner.container)
 
     this.engine.app.stage.addChild(this.rootContainer)
@@ -220,8 +278,24 @@ export class FishingScene implements GameScene {
     // Systems
     this.hungerSystem.update(deltaSeconds, this.elapsedMs)
     this.weatherSystem.update(this.hungerSystem.getHunger())
+    this.timeOfDay.update(deltaSeconds)
     const weather = this.weatherSystem.get()
+    const tod = this.timeOfDay.get()
     this.audio.setWeather(weather.intensity)
+    // Push the time-of-day snapshot into every layer that paints itself
+    // differently between day and night. We use setters (not constructor
+    // wiring) so the data flow is obvious — one place "broadcasts", and
+    // each entity caches the latest value for its own draw step.
+    this.skyLayer.setTimeOfDay(tod)
+    this.horizonLayer.setTimeOfDay(tod)
+    this.foregroundProps.setTimeOfDay(tod)
+    this.fogLayer.setTimeOfDay(tod)
+    this.fogLayer.setWeather(weather)
+    // Mermaid's moonlight glow ramps up as nightPhase climbs past
+    // ~0.55 (the "evening" threshold) and peaks at midnight.
+    this.mermaidRock.setMoonlight(Math.max(0, (tod.nightPhase - 0.55) / 0.45))
+    // The boat needs its own night strength so the lantern fades in/out.
+    this.boat.setNightStrength(tod.nightPhase)
 
     // Beat pulse: 1.0 right on a beat, fading toward 0 by ~25% into the
     // beat. Even outside of battle (when drums are silent) the clock is
@@ -231,12 +305,35 @@ export class FishingScene implements GameScene {
     const beatPulse = beatPhase < 0.25 ? 1 - beatPhase / 0.25 : 0
 
     // Entities
-    this.ocean.update(deltaSeconds, weather, this.elapsedMs, beatPulse)
-    this.boat.update(deltaSeconds, weather, this.elapsedMs, this.viewport)
+    this.ocean.update(deltaSeconds, weather, this.elapsedMs, beatPulse, tod)
+    // Distant sky decorations tick on the same weather snapshot so
+    // clouds/birds dim during storms and the horizon mountains drift
+    // with the wind. Updated BEFORE the foreground entities so any
+    // composite reads (e.g. the sun position for moonlight later on)
+    // see the freshest values. Aurora + shooting stars need the beat
+    // pulse so they shimmer on the downbeat.
+    this.skyLayer.update(deltaSeconds, weather, this.elapsedMs, beatPulse)
+    this.horizonLayer.update(deltaSeconds, weather)
+    // Foreground reefs/buoys/driftwood scroll past at a faster
+    // parallax than the horizon, with beat-synced foam pulses so
+    // the "wakes" on each prop punch on the downbeat.
+    this.foregroundProps.setBeatPulse(beatPulse)
+    this.foregroundProps.update(deltaSeconds, weather)
+    // Fog reads its inputs via setters above; this tick advances drift.
+    this.fogLayer.setBeatPulse(beatPulse)
+    this.fogLayer.update(deltaSeconds)
+    this.boat.update(deltaSeconds, weather, this.elapsedMs, this.viewport, beatPulse)
     this.penguin.update(deltaSeconds, this.hungerSystem.getHunger(), beatPulse)
+    // Pump the BeatClock phase into the school every frame so the
+    // dance / splash logic stays in sync with the audio even after
+    // BattleState (which also calls setBeatPhase) has exited.
+    this.fishSchool.setBeatPhase(beatPhase)
     this.fishSchool.update(deltaSeconds, weather.intensity)
     this.hook.update(deltaSeconds, this.viewport, this.boat.rodTipX, this.boat.rodTipY, weather.windPush)
     this.mermaidRock.update(deltaSeconds)
+    // Whale needs the beat phase so its spout fires on the downbeat
+    // (same edge-detection trick the fish-school splash uses).
+    this.whale.update(deltaSeconds, beatPhase)
 
     // Park the penguin on the boat's deck — it visibly rides the wave
     // bob and its beat-driven bounce stacks on top of the boat's own
@@ -251,6 +348,14 @@ export class FishingScene implements GameScene {
     this.eventOverlay.update(deltaSeconds)
     this.catchBanner.update(deltaSeconds)
     this.noteLane.update(deltaSeconds, performance.now())
+    // FrenzyOverlay ticks centrally so it can finish its exit animation
+    // even after BattleState has already torn down. BattleState only
+    // activates/deactivates it; this loop owns its visual lifecycle.
+    {
+      const phase = this.beatClock.started ? this.beatClock.phase(performance.now()) : 0.5
+      const beatPulse = phase < 0.2 ? 1 - phase / 0.2 : 0
+      this.frenzyOverlay.update(deltaSeconds, beatPulse)
+    }
     this.refreshHud()
 
     this.stateMachine.update(deltaSeconds, this.elapsedMs)
@@ -290,6 +395,11 @@ export class FishingScene implements GameScene {
     this.ocean.setViewport(this.viewport)
     this.castPreview.setViewport(this.viewport)
     this.fishSchool.setViewport(this.viewport)
+    this.whale.setViewport(this.viewport)
+    this.skyLayer.setViewport(this.viewport)
+    this.horizonLayer.setViewport(this.viewport)
+    this.foregroundProps.setViewport(this.viewport)
+    this.fogLayer.setViewport(this.viewport)
     this.boat.setBase(width / 2, waterLineY - 8)
     this.mermaidRock.setLayout(width, waterLineY)
     this.hud.setLayout(width, height)
@@ -332,6 +442,9 @@ export class FishingScene implements GameScene {
     const willpowerLen = Math.max(140, Math.min(320, height - tensionBottomY - pullRadius * 2 - 40))
     const willpowerCy = (tensionBottomY + (height - pullRadius * 2 - 20)) / 2
     this.willpowerBar.setLayout(width - 14, willpowerCy, willpowerLen)
+    // Frenzy overlay tracks the full viewport — its vignette wraps
+    // every edge and the banner anchors near the top.
+    this.frenzyOverlay.setLayout(width, height)
   }
 
   destroy(): void {
@@ -431,6 +544,7 @@ export class FishingScene implements GameScene {
       hook: this.hook,
       fishSchool: this.fishSchool,
       mermaidRock: this.mermaidRock,
+      whale: this.whale,
       hud: this.hud,
       castPreview: this.castPreview,
       reelButtons: this.reelButtons,
@@ -440,6 +554,7 @@ export class FishingScene implements GameScene {
       eventOverlay: this.eventOverlay,
       catchBanner: this.catchBanner,
       noteLane: this.noteLane,
+      frenzyOverlay: this.frenzyOverlay,
       shake: (amplitude: number, duration: number) => scene.triggerShake(amplitude, duration),
       hungerSystem: this.hungerSystem,
       weatherSystem: this.weatherSystem,

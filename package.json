@@ -7,7 +7,11 @@
     "dev": "cross-env VITE_I18N_MODE=dev vite --host",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "build:analyze": "cross-env VITE_I18N_MODE=dev NODE_ENV=analyze vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "web:dev": "vite --config web/vite.config.ts",
+    "web:build": "vite build --config web/vite.config.ts",
+    "web:preview": "vite preview --config web/vite.config.ts --port 4174",
+    "web:standalone": "cross-env STANDALONE=1 vite build --config web/vite.config.ts"
   },
   "dependencies": {
     "@eebuk/cli": "^1.0.5",
@@ -22,6 +26,7 @@
     "cross-env": "^7.0.3",
     "rollup-plugin-visualizer": "^5.14.0",
     "typescript": "5.7.2",
-    "vite": "7.3.1"
+    "vite": "7.3.1",
+    "vite-plugin-singlefile": "^2.3.3"
   }
 }

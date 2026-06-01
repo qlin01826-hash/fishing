@@ -39,6 +39,10 @@ export class HookedState implements IFishingState {
     this.ctx.reelButtons.setVisible(false)
     this.ctx.eventOverlay.showStrike()
     this.ctx.audio.playBiteAlert()
+    // Penguin reaction: wide-eyed surprise the instant the bite hits.
+    // The transient mood is restored to whatever SailingState picks on
+    // the way back, so we just slam it here without bookkeeping.
+    this.ctx.penguin.setMood('surprised')
     // Keep the commission request bubble — players need it as a reminder
     // during the strike window. The eventOverlay handles the strike prompt.
   }

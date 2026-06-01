@@ -1,6 +1,20 @@
 import { Container, Graphics } from 'pixi.js'
 import type { ViewportContext, WeatherSnapshot } from '../types'
 
+/** One bubble in the foam wake trailing behind the boat. */
+interface WakeParticle {
+  /** World-space position (px). */
+  x: number
+  y: number
+  vx: number
+  /** Particle's age in seconds (counts up; max = lifetime). */
+  age: number
+  /** Lifetime in seconds. */
+  life: number
+  /** Pre-rolled per-particle size so the trail isn't a uniform ribbon. */
+  baseRadius: number
+}
+
 /**
  * The player's fishing boat — drawn entirely from primitives and styled
  * to feel like a happy children's-book tugboat: rounded scarlet hull,
@@ -17,6 +31,14 @@ import type { ViewportContext, WeatherSnapshot } from '../types'
  */
 export class Boat {
   readonly container = new Container()
+  /**
+   * Foam wake trail — drawn in WORLD coords (not inside the bobbing
+   * boat container) so the foam stays parked on the water instead of
+   * pitching/rolling with the hull. FishingScene mounts this in the
+   * above-water layer BEFORE the boat so the hull occludes the
+   * leading edge of the trail.
+   */
+  readonly wakeContainer = new Container()
   /** World-space anchor of the rod tip. Updated each frame. */
   rodTipX = 0
   rodTipY = 0
@@ -31,13 +53,49 @@ export class Boat {
   private readonly mast = new Graphics()
   private readonly rod = new Graphics()
   private readonly face = new Graphics()
+  /** Lantern hanging off the mast, only visible at night. */
+  private readonly lantern = new Graphics()
+  /** Soft warm halo cast by the lantern. Drawn BEHIND the hull so it
+   *  reads as light bleeding past the boat rather than a pasted disc. */
+  private readonly lanternHalo = new Graphics()
+  /** Wake particle painter (single Graphics for the whole trail). */
+  private readonly wakeGraphics = new Graphics()
 
   private baseX = 0
   private baseY = 0
   private bobPhase = Math.random() * Math.PI * 2
 
+  /** Active wake particles. */
+  private wake: WakeParticle[] = []
+  /** Accumulator for fractional emissions per frame. */
+  private wakeSpawnAccum = 0
+  /** Last frame's beat-pulse value, used for downbeat-edge detection. */
+  private prevBeatPulse = 0
+
+  /** 0..1 lerped target for night intensity (drives lantern visibility). */
+  private nightTarget = 0
+  private night = 0
+  /** Beat-driven flame flicker amount (0..1, lerps each frame). */
+  private flameFlicker = 0
+
   constructor() {
-    this.container.addChild(this.hull, this.face, this.deck, this.cabin, this.mast, this.rod)
+    // lanternHalo first so it sits BEHIND the hull, then the boat
+    // sprites, then the lantern body on top so the flame is in front
+    // of the mast.
+    this.container.addChild(
+      this.lanternHalo,
+      this.hull,
+      this.face,
+      this.deck,
+      this.cabin,
+      this.mast,
+      this.rod,
+      this.lantern,
+    )
+    this.wakeContainer.addChild(this.wakeGraphics)
+    this.wakeContainer.eventMode = 'none'
+    this.lantern.visible = false
+    this.lanternHalo.visible = false
   }
 
   /** Re-anchor on resize. baseY usually = waterLineY. */
@@ -47,7 +105,27 @@ export class Boat {
     this.draw()
   }
 
-  update(dtSeconds: number, weather: WeatherSnapshot, elapsedMs: number, viewport: ViewportContext): void {
+  /**
+   * Latch how dark it is (0 = daylight, 1 = midnight). The lantern
+   * fades in/out smoothly based on this — pumped by FishingScene from
+   * the TimeOfDaySystem snapshot.
+   */
+  setNightStrength(target: number): void {
+    this.nightTarget = Math.max(0, Math.min(1, target))
+  }
+
+  /**
+   * @param beatPulse 0..1, peaks on every downbeat. Used to (a) burst
+   *                  extra foam at the wake's leading edge and (b)
+   *                  flicker the lantern flame in time with the music.
+   */
+  update(
+    dtSeconds: number,
+    weather: WeatherSnapshot,
+    elapsedMs: number,
+    viewport: ViewportContext,
+    beatPulse = 0,
+  ): void {
     this.bobPhase += dtSeconds * (1.4 + weather.intensity * 1.2)
     const amplitude = 4 + weather.intensity * 12
     const lift = Math.sin(this.bobPhase) * amplitude
@@ -68,8 +146,24 @@ export class Boat {
     const deckLocalY = -8
     this.deckCenterX = this.baseX + deckLocalX * cos - deckLocalY * sin
     this.deckTopY = this.baseY + lift + deckLocalX * sin + deckLocalY * cos
-    void elapsedMs
-    void viewport
+
+    // ---- Wake foam ----
+    // Pass through the live `lift` so newly-spawned particles emerge at
+    // the boat's CURRENT bobbing height — the trail then naturally
+    // ripples in a sine wave behind the hull instead of sitting on a
+    // flat waterline that disagrees with the rocking boat.
+    this.updateWake(dtSeconds, weather, beatPulse, viewport, lift)
+
+    // ---- Lantern lifecycle ----
+    this.night += (this.nightTarget - this.night) * Math.min(1, dtSeconds * 1.5)
+    // Detect a fresh downbeat edge (pulse jumped UP this frame) to fire
+    // a single flicker burst rather than a continuous wobble.
+    if (beatPulse > 0.7 && this.prevBeatPulse < 0.4) {
+      this.flameFlicker = 1
+    }
+    this.flameFlicker = Math.max(0, this.flameFlicker - dtSeconds * 4)
+    this.prevBeatPulse = beatPulse
+    this.drawLantern(elapsedMs)
   }
 
   private draw(): void {
@@ -79,6 +173,154 @@ export class Boat {
     this.drawCabin()
     this.drawMast()
     this.drawRod()
+  }
+
+  /**
+   * Emit + age + render the foam trail behind the boat. Particles live
+   * in WORLD space so the trail stays parked on the water while the
+   * boat itself pitches and rolls overhead.
+   *
+   * Beat sync: the steady "drift" emission rate scales modestly with
+   * weather (rougher seas churn more foam), and on a downbeat we add a
+   * concentrated extra burst so the music visually pushes the boat.
+   */
+  private updateWake(
+    dtSeconds: number,
+    weather: WeatherSnapshot,
+    beatPulse: number,
+    viewport: ViewportContext,
+    boatLift: number,
+  ): void {
+    // Spawn point: just behind the hull's left edge, riding the boat's
+    // current bobbed height. `boatLift` is the live vertical offset
+    // from `baseY` — adding it here means peaks of the bob produce
+    // higher foam pads and troughs produce lower ones, so the trail
+    // visibly inherits the boat's wave-bob over time.
+    const sternX = this.baseX - 80
+    const sternY = this.baseY + boatLift + 4
+
+    // Steady emission. Rate climbs gently with weather + faster on beat.
+    const steady = 18 + weather.intensity * 24 + beatPulse * 28
+    this.wakeSpawnAccum += steady * dtSeconds
+    while (this.wakeSpawnAccum > 1) {
+      this.wakeSpawnAccum -= 1
+      this.spawnWake(sternX, sternY, weather)
+    }
+    // Downbeat burst — fire a clump of 3–5 extra particles right on the
+    // downbeat edge so the wake visibly punches with each kick of the
+    // drum loop. Edge-detected via the boat's `prevBeatPulse` so we
+    // don't spam every frame the pulse is high.
+    if (beatPulse > 0.75 && this.prevBeatPulse < 0.4) {
+      const burst = 3 + Math.floor(weather.intensity * 3)
+      for (let i = 0; i < burst; i += 1) {
+        this.spawnWake(sternX - i * 6, sternY + (Math.random() - 0.5) * 4, weather)
+      }
+    }
+
+    // Advance + cull.
+    for (const p of this.wake) {
+      p.x += p.vx * dtSeconds
+      // Slight vertical jitter so the trail isn't a perfect horizontal
+      // ribbon; particles drift up/down on a tiny sine.
+      p.y += Math.sin(p.age * 9 + p.baseRadius) * 4 * dtSeconds
+      p.age += dtSeconds
+    }
+    const cullLeft = -120
+    this.wake = this.wake.filter((p) => p.age < p.life && p.x > cullLeft)
+    // Hard cap so a long session can't accumulate.
+    if (this.wake.length > 80) this.wake.splice(0, this.wake.length - 80)
+
+    // Render. Each particle is a soft white ellipse that GROWS as it
+    // ages (the bubble spreads/diffuses) and fades out via alpha.
+    const g = this.wakeGraphics
+    g.clear()
+    void viewport
+    for (const p of this.wake) {
+      const t01 = p.age / p.life
+      const r = p.baseRadius * (1 + t01 * 1.6)
+      const a = (1 - t01) * 0.72
+      // Outer halo
+      g.ellipse(p.x, p.y, r * 1.4, r * 0.6)
+      g.fill({ color: 0xeaf6ff, alpha: a * 0.45 })
+      // Inner bright cap
+      g.ellipse(p.x, p.y - r * 0.15, r * 0.7, r * 0.35)
+      g.fill({ color: 0xffffff, alpha: a })
+    }
+  }
+
+  private spawnWake(x: number, y: number, weather: WeatherSnapshot): void {
+    // Drift left with the current. Faster in windy weather.
+    const driftSpeed = -(28 + weather.windPush * 0.4 + Math.random() * 14)
+    this.wake.push({
+      x: x + (Math.random() - 0.5) * 14,
+      y: y + (Math.random() - 0.5) * 4,
+      vx: driftSpeed,
+      age: 0,
+      life: 1.5 + Math.random() * 0.8,
+      baseRadius: 3 + Math.random() * 2.5,
+    })
+  }
+
+  /**
+   * Draw the lantern + its warm halo. Hidden during the day; fades in
+   * after dusk. The flame body flickers on the beat for life.
+   */
+  private drawLantern(elapsedMs: number): void {
+    const halo = this.lanternHalo
+    const body = this.lantern
+    halo.clear()
+    body.clear()
+    if (this.night < 0.02) {
+      halo.visible = false
+      body.visible = false
+      return
+    }
+    halo.visible = true
+    body.visible = true
+    // Lantern hangs from the cabin roof, on the right side of the mast.
+    // Local coords (relative to boat container).
+    const lx = -22
+    const ly = -34
+    // Halo: three stacked translucent discs of warm orange/yellow.
+    // Strength scales with night, plus a small beat-driven flicker.
+    const strength = this.night * (0.85 + 0.15 * Math.sin(elapsedMs * 0.012))
+    const beatBoost = 1 + this.flameFlicker * 0.35
+    const haloAlpha = strength * beatBoost
+    halo.circle(lx, ly + 4, 84)
+    halo.fill({ color: 0xffae4f, alpha: 0.045 * haloAlpha })
+    halo.circle(lx, ly + 4, 58)
+    halo.fill({ color: 0xffc36c, alpha: 0.08 * haloAlpha })
+    halo.circle(lx, ly + 4, 36)
+    halo.fill({ color: 0xffe19a, alpha: 0.13 * haloAlpha })
+
+    // Suspension chain — a thin line from the cabin roof down to the
+    // lantern's top ring.
+    body.moveTo(lx, ly - 14)
+    body.lineTo(lx, ly - 6)
+    body.stroke({ color: 0x3a2810, width: 1, alpha: this.night })
+    // Top ring
+    body.rect(lx - 4, ly - 6, 8, 2)
+    body.fill({ color: 0x3a2810, alpha: this.night })
+    // Lantern body — a small lantern shape (trapezoid + glass).
+    body.poly([lx - 6, ly - 4, lx + 6, ly - 4, lx + 5, ly + 8, lx - 5, ly + 8])
+    body.fill({ color: 0x6a3a1a, alpha: this.night })
+    // Glass: amber pane.
+    body.rect(lx - 4, ly - 2, 8, 8)
+    body.fill({ color: 0xffd078, alpha: this.night * 0.95 })
+    // Flame: small flicker triangle, jittered by the flame flicker amount.
+    const flameJitterX = (Math.random() - 0.5) * this.flameFlicker * 2
+    const flameTop = ly + 1 + this.flameFlicker * -1.6
+    body.poly([
+      lx - 2 + flameJitterX, ly + 5,
+      lx + flameJitterX, flameTop,
+      lx + 2 + flameJitterX, ly + 5,
+    ])
+    body.fill({ color: 0xff9a3c, alpha: this.night })
+    body.circle(lx + flameJitterX, ly + 4, 1.4)
+    body.fill({ color: 0xfff6c0, alpha: this.night })
+    // Base of lantern.
+    body.rect(lx - 5, ly + 8, 10, 2)
+    body.fill({ color: 0x3a2810, alpha: this.night })
   }
 
   /**
