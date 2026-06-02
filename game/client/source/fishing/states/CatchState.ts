@@ -51,8 +51,9 @@ export class CatchState implements IFishingState {
     // Count this successful catch — drives where the next battle's
     // song starts (a more advanced section / more complex arrangement).
     this.ctx.catchesThisRun += 1
-    // Advance the difficulty ladder. A stage-up here gets announced by
-    // SailingState on the way back out (it polls consumeStageUp()).
+    // Advance the difficulty ladder one stage (every catch = one stage,
+    // 15 total). Crossing into a new named zone gets announced by
+    // SailingState on the way back out (it polls consumeZoneUp()).
     this.ctx.progression.reportCatch()
 
     this.ctx.catchBanner.show(

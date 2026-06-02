@@ -5,7 +5,7 @@ import type { Direction, FishDef, FishingStateId } from '../types'
 import { FISHING_CONSTANTS } from '../types'
 import type { AmbientFish } from '../entities/FishSchool'
 import type { TapJudgement } from '../ui/PullPanel'
-import { sectionForCatches } from '../systems/AudioSystem'
+import { sectionForStage } from '../systems/AudioSystem'
 import { CatchState } from './CatchState'
 import { SailingState } from './SailingState'
 
@@ -203,7 +203,10 @@ export class BattleState implements IFishingState {
     // rather than "how hungry is the penguin".
     const bpm = Math.round(stage.bpmBase + (intensity - 0.5) * 12)
     this.ctx.beatClock.setBpm(bpm)
-    const startSection = sectionForCatches(this.ctx.catchesThisRun)
+    // Music complexity is driven by the depth STAGE now: deeper water
+    // opens the fight in a richer section so the arrangement escalates
+    // as the player descends the 15-stage ladder.
+    const startSection = sectionForStage(stage.index)
     this.ctx.audio.startBeats(intensity, startSection)
     // start() resets the lane, so apply the stage's chart density range
     // + reaction speed (look-ahead) AFTER it. Look-ahead only matters in

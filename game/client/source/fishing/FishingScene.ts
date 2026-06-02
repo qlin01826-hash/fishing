@@ -16,6 +16,7 @@ import { SkyLayer } from './entities/SkyLayer'
 import { HorizonLayer } from './entities/HorizonLayer'
 import { ForegroundProps } from './entities/ForegroundProps'
 import { FogLayer } from './entities/FogLayer'
+import { AbyssOverlay } from './entities/AbyssOverlay'
 
 import { Hud } from './ui/Hud'
 import { CastPreview } from './ui/CastPreview'
@@ -80,6 +81,7 @@ export class FishingScene implements GameScene {
   private readonly horizonLayer: HorizonLayer
   private readonly foregroundProps: ForegroundProps
   private readonly fogLayer: FogLayer
+  private readonly abyssOverlay: AbyssOverlay
 
   // UI
   private readonly hud: Hud
@@ -98,6 +100,8 @@ export class FishingScene implements GameScene {
   private readonly weatherSystem = new WeatherSystem()
   private readonly timeOfDay = new TimeOfDaySystem()
   private readonly progression = new ProgressionSystem()
+  /** Eased abyss-mood value (0..1) following the stage's depthMood. */
+  private depthMoodCurrent = 0
   private readonly audio = new AudioSystem()
   private readonly pointer = new PointerTracker()
   private readonly beatClock = new BeatClock()
@@ -137,6 +141,7 @@ export class FishingScene implements GameScene {
     this.horizonLayer = new HorizonLayer(this.viewport)
     this.foregroundProps = new ForegroundProps(this.viewport)
     this.fogLayer = new FogLayer(this.viewport)
+    this.abyssOverlay = new AbyssOverlay(this.viewport)
 
     this.hud = new Hud()
     this.castPreview = new CastPreview(this.viewport)
@@ -206,6 +211,10 @@ export class FishingScene implements GameScene {
     // visibly muffles the boat/mermaid silhouettes during a heavy
     // storm or a deep-night run.
     this.aboveWaterContainer.addChild(this.fogLayer.container)
+    // Abyss pressure vignette — the very topmost above-water layer so it
+    // dims the whole seascape (boat, fish, fog) as the run descends,
+    // while the UI/topUi containers above stay perfectly crisp.
+    this.aboveWaterContainer.addChild(this.abyssOverlay.container)
 
     this.uiContainer.addChild(this.castPreview.container)
     this.uiContainer.addChild(this.reelButtons.container)
@@ -306,6 +315,15 @@ export class FishingScene implements GameScene {
     const beatPhase = this.beatClock.started ? this.beatClock.phase() : 0.5
     const beatPulse = beatPhase < 0.25 ? 1 - beatPhase / 0.25 : 0
 
+    // Abyss descent mood: ease the current depth atmosphere toward the
+    // stage's target so it deepens smoothly between battles instead of
+    // popping on each catch. Drives the ocean palette + edge vignette.
+    const targetMood = this.progression.depthMood
+    this.depthMoodCurrent += (targetMood - this.depthMoodCurrent) * Math.min(1, deltaSeconds * 1.2)
+    this.ocean.setDepthMood(this.depthMoodCurrent)
+    this.abyssOverlay.setMood(this.depthMoodCurrent)
+    this.abyssOverlay.update()
+
     // Entities
     this.ocean.update(deltaSeconds, weather, this.elapsedMs, beatPulse, tod)
     // Distant sky decorations tick on the same weather snapshot so
@@ -402,6 +420,7 @@ export class FishingScene implements GameScene {
     this.horizonLayer.setViewport(this.viewport)
     this.foregroundProps.setViewport(this.viewport)
     this.fogLayer.setViewport(this.viewport)
+    this.abyssOverlay.setViewport(this.viewport)
     this.boat.setBase(width / 2, waterLineY - 8)
     this.mermaidRock.setLayout(width, waterLineY)
     this.hud.setLayout(width, height)

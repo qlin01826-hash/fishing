@@ -47,6 +47,12 @@ export class Ocean {
   private flashTimer = 0
   private timeSinceLastBolt = 0
   private viewport: ViewportContext
+  /**
+   * Abyss intensity 0..1 driven by the run's depth stage. Darkens and
+   * cools the water (and slightly the sky) so descending the 15-stage
+   * ladder feels like sinking into a pressurised, ominous deep.
+   */
+  private depthMood = 0
 
   constructor(viewport: ViewportContext) {
     this.viewport = viewport
@@ -60,6 +66,11 @@ export class Ocean {
 
   setViewport(viewport: ViewportContext): void {
     this.viewport = viewport
+  }
+
+  /** Set the abyss/depth atmosphere intensity (0 = shallows, 1 = abyss). */
+  setDepthMood(t: number): void {
+    this.depthMood = Math.max(0, Math.min(1, t))
   }
 
   update(
@@ -109,8 +120,14 @@ export class Ocean {
     // it's already dark.
     const nightTop = colorMix(0x05082b, 0x0a0a1c, weather.intensity * 0.5)
     const nightBot = colorMix(0x1d2860, 0x171a3a, weather.intensity * 0.5)
-    const top = colorMix(dayTop, nightTop, nightPhase)
-    const bot = colorMix(dayBot, nightBot, nightPhase)
+    let top = colorMix(dayTop, nightTop, nightPhase)
+    let bot = colorMix(dayBot, nightBot, nightPhase)
+    // The sky also broods as we descend — a heavier, storm-bruised
+    // ceiling sells the "abyss challenge" even above the waterline.
+    if (this.depthMood > 0) {
+      top = colorMix(top, 0x0a0e1e, this.depthMood * 0.55)
+      bot = colorMix(bot, 0x171a30, this.depthMood * 0.55)
+    }
     // Sunset/sunrise warm wash: lerp the LOWER strips toward warm
     // orange. Strongest right at the horizon, fading out by the top.
     const glowColor = colorMix(0xff8d4a, 0x6b1d5f, nightPhase * 0.4)
@@ -133,8 +150,14 @@ export class Ocean {
     g.clear()
     const strips = 18
     // Even underwater dims at night — the surface lets in less light.
-    const top = colorMix(0x2f78a9, 0x0c1c3d, nightPhase)
-    const bot = colorMix(0x051628, 0x010512, nightPhase)
+    let top = colorMix(0x2f78a9, 0x0c1c3d, nightPhase)
+    let bot = colorMix(0x051628, 0x010512, nightPhase)
+    // Abyss descent: crush both ends toward a cold near-black so deeper
+    // stages read as oppressive, lightless water.
+    if (this.depthMood > 0) {
+      top = colorMix(top, 0x041220, this.depthMood * 0.85)
+      bot = colorMix(bot, 0x00030a, this.depthMood * 0.9)
+    }
     for (let i = 0; i < strips; i += 1) {
       const t = i / (strips - 1)
       const color = colorMix(top, bot, t)
@@ -173,8 +196,13 @@ export class Ocean {
     const nearDay = colorMix(0xc4e3ff, 0x7a6aa5, weather.intensity)
     const farNight = colorMix(0x4a608a, 0x2c2750, weather.intensity)
     const nearNight = colorMix(0x2e4070, 0x1a1735, weather.intensity)
-    const farColor = colorMix(farDay, farNight, nightPhase)
-    const nearColor = colorMix(nearDay, nearNight, nightPhase)
+    let farColor = colorMix(farDay, farNight, nightPhase)
+    let nearColor = colorMix(nearDay, nearNight, nightPhase)
+    // Deep stages drag the surface toward cold abyssal slate.
+    if (this.depthMood > 0) {
+      farColor = colorMix(farColor, 0x16243f, this.depthMood * 0.7)
+      nearColor = colorMix(nearColor, 0x0c1730, this.depthMood * 0.75)
+    }
     this.farWaves.clear()
     this.nearWaves.clear()
 

@@ -43,6 +43,73 @@ const ROOT = resolve(__dirname, '..')
 
 const STANDALONE = !!process.env.STANDALONE
 
+/**
+ * Standalone single-file builds inline the bundle into the HTML. The
+ * `vite-plugin-singlefile` plugin emits it as `<script type="module">`,
+ * but module scripts run with a `null` origin under `file://`, which
+ * Chrome / WeChat / most mobile in-app browsers REFUSE to execute — the
+ * page then spins forever on the loading screen when the file is opened
+ * directly (double-click / shared attachment) instead of via a server.
+ *
+ * Paired with an `iife` rollup output (a classic, import/export-free
+ * bundle), this post-plugin rewrites the inlined module script into a
+ * plain `<script>` so it runs when opened directly on ANY device.
+ *
+ * Two subtleties handled here:
+ *  1. Module scripts are implicitly DEFERRED (run after the DOM is
+ *     parsed); a classic inline `<script>` runs IMMEDIATELY where it
+ *     sits. Vite injects the entry into `<head>`, so a naive demote
+ *     would execute before `#game-container` exists ("Missing
+ *     #game-container"). We therefore MOVE the demoted script to the
+ *     very end of `<body>` to preserve the deferred-execution ordering.
+ *  2. Leftover `modulepreload` hints reference chunks that no longer
+ *     exist once everything is inlined, so we strip them.
+ */
+function demoteToClassicScriptPlugin(): any {
+  return {
+    name: 'minigame:demote-to-classic-script',
+    enforce: 'post',
+    generateBundle(_options: any, bundle: Record<string, any>) {
+      for (const key of Object.keys(bundle)) {
+        const asset = bundle[key]
+        if (asset.type !== 'asset' || !key.endsWith('.html')) continue
+        let html = String(asset.source)
+
+        // Strip now-dangling module-preload hints.
+        html = html.replace(/<link[^>]+rel=(["'])?modulepreload\1?[^>]*>/gi, '')
+
+        // Pull every inlined `<script type="module">…</script>` out of
+        // wherever Vite placed it (usually <head>) and collect its code.
+        const collected: string[] = []
+        html = html.replace(
+          /<script\s+type=(["'])module\1[^>]*>([\s\S]*?)<\/script>/gi,
+          (_m: string, _q: string, code: string) => {
+            collected.push(code)
+            return ''
+          },
+        )
+
+        if (collected.length > 0) {
+          // Re-emit as classic scripts at the very end of <body> so the
+          // DOM (incl. #game-container) is fully parsed before they run.
+          const tags = collected.map((code) => `<script>${code}</script>`).join('\n')
+          // IMPORTANT: insert via slice, NOT String.replace — the bundle
+          // is full of `$` sequences ($&, $1, $$, …) that String.replace
+          // would interpret as replacement patterns and corrupt the JS
+          // (manifests as "Uncaught SyntaxError: Unexpected token '<'").
+          const idx = html.lastIndexOf('</body>')
+          html =
+            idx !== -1
+              ? `${html.slice(0, idx)}${tags}\n${html.slice(idx)}`
+              : html + tags
+        }
+
+        asset.source = html
+      }
+    },
+  }
+}
+
 // Legacy custom inline plugin kept for reference only — replaced by
 // the battle-tested `vite-plugin-singlefile` (used in `plugins` below).
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -133,8 +200,14 @@ export default defineConfig({
           // every chunk is inlined, and it leaves stray `__VITE_PRELOAD__`
           // identifiers in the bundle that can break parsing.
           removeViteModuleLoader: true,
-          useRecommendedBuildConfig: true,
+          // We drive the build config explicitly below (incl. the `iife`
+          // output that makes the file:// fix possible), so don't let the
+          // plugin re-impose its own ESM-oriented recommended config.
+          useRecommendedBuildConfig: false,
         }),
+        // Runs AFTER singlefile has inlined everything: turns the inlined
+        // module script into a classic one so the file opens via file://.
+        demoteToClassicScriptPlugin(),
       ]
     : [],
   resolve: {
@@ -179,6 +252,13 @@ export default defineConfig({
     rollupOptions: {
       output: STANDALONE
         ? {
+            // `iife` = one classic, import/export-free bundle. Combined
+            // with the demote-to-classic-script plugin this is what lets
+            // the single file run when opened directly via file:// on
+            // phones / WeChat / in-app browsers (where `type="module"`
+            // scripts are blocked).
+            format: 'iife',
+            name: 'fishingPenguin',
             inlineDynamicImports: true,
             entryFileNames: 'assets/main.js',
             assetFileNames: 'assets/[name][extname]',

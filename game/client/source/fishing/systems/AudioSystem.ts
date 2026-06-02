@@ -1252,6 +1252,25 @@ export function sectionForCatches(catches: number): Section {
   return 'intro'
 }
 
+/**
+ * Pick the section a new battle should *open* at based on the run's
+ * depth STAGE (0..14). The arrangement thickens as the player descends:
+ * the shallows open sparse, and by mid-run every fight starts straight
+ * in the full chorus — after which tighter timing + faster tempo carry
+ * the remaining escalation.
+ *
+ *   stage 0       : intro     (sparse, slow build)
+ *   stage 1–2     : verse     (in the groove)
+ *   stage 3–4     : preChorus (build-up)
+ *   stage 5+      : chorus    (full arrangement, key changes)
+ */
+export function sectionForStage(stageIndex: number): Section {
+  if (stageIndex >= 5) return 'chorus'
+  if (stageIndex >= 3) return 'preChorus'
+  if (stageIndex >= 1) return 'verse'
+  return 'intro'
+}
+
 type DrumPattern = 'sparse' | 'four' | 'four-plus' | 'driving' | 'half-time'
 
 type FluteRole = 'off' | 'accents' | 'counter' | 'lead'

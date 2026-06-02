@@ -32,13 +32,17 @@ export class SailingState implements IFishingState {
     }
     this.ctx.penguin.showRequest(this.ctx.commissionFish)
 
-    // If the catch we just landed pushed us into a new sea area,
-    // announce it now. The transient message shows over the commission
-    // request, then falls back to the request once its timer expires.
-    if (this.ctx.progression.consumeStageUp()) {
-      const stageName = t(`stage.${this.ctx.progression.stage.name}`)
-      this.ctx.penguin.showMessage(t('game.enterStage', { name: stageName }), 'excited', 2600)
+    // Difficulty climbs every catch, but we only announce when the run
+    // crosses into a new NAMED ZONE (5× per run) so the banner never
+    // spams. The deepening visuals + faster music carry the per-stage
+    // escalation silently in between.
+    if (this.ctx.progression.consumeZoneUp()) {
+      const zoneName = t(`stage.${this.ctx.progression.stage.name}`)
+      this.ctx.penguin.showMessage(t('game.enterStage', { name: zoneName }), 'excited', 2600)
       this.ctx.shake(5, 0.4)
+    } else {
+      // Clear the per-stage flag so it doesn't leak; no announcement.
+      this.ctx.progression.consumeStageUp()
     }
   }
 
