@@ -28,7 +28,15 @@
     "windCalm": "Calm waters",
     "windBreeze": "Light breeze",
     "windStrong": "Strong wind",
-    "windStorm": "STORM !"
+    "windStorm": "STORM !",
+    "enterStage": "Entering {{name}} !"
+  },
+  "stage": {
+    "shallows": "the Shallows",
+    "coast": "Coastal Waters",
+    "deep": "the Deep Sea",
+    "abyss": "the Abyss",
+    "abyssDeep": "the Endless Abyss"
   },
   "penguin": {
     "request": "I'm hungry. Catch me a {{wish}} (><)",

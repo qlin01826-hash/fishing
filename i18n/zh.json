@@ -28,7 +28,15 @@
     "windCalm": "海面平静",
     "windBreeze": "微风轻拂",
     "windStrong": "大风呼啸",
-    "windStorm": "狂  风  暴  雨 !"
+    "windStorm": "狂  风  暴  雨 !",
+    "enterStage": "驶入{{name}}！"
+  },
+  "stage": {
+    "shallows": "浅滩",
+    "coast": "近海",
+    "deep": "深海",
+    "abyss": "深渊",
+    "abyssDeep": "万丈深渊"
   },
   "penguin": {
     "request": "我饿了，给我钓一条 {{wish}} 吧 (><)",

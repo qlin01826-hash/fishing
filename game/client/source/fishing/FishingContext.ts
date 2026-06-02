@@ -23,6 +23,7 @@ import type { WeatherSystem } from './systems/WeatherSystem'
 import type { AudioSystem } from './systems/AudioSystem'
 import type { PointerTracker } from './systems/PointerTracker'
 import type { BeatClock } from './systems/BeatClock'
+import type { ProgressionSystem } from './systems/ProgressionSystem'
 
 /**
  * Read/write surface that the per-state classes use to talk to the
@@ -58,6 +59,11 @@ export interface FishingContext {
   readonly audio: AudioSystem
   readonly pointer: PointerTracker
   readonly beatClock: BeatClock
+  /**
+   * Run difficulty ladder. The explicit, legible difficulty axis —
+   * stage climbs with catches and sets the floor on every battle knob.
+   */
+  readonly progression: ProgressionSystem
   // Session state
   /** Score for the current play session. */
   sessionScore: number

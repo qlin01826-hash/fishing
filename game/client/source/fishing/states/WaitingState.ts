@@ -79,17 +79,29 @@ export class WaitingState implements IFishingState {
   }
 
   private commitBite(): void {
-    const { fishSchool, hook, viewport, weatherSystem } = this.ctx
+    const { fishSchool, hook, viewport, weatherSystem, progression } = this.ctx
     const depth01 =
       (hook.y - viewport.waterLineY) / Math.max(1, viewport.maxDepth)
     const nearby = fishSchool.pickNearestFish(hook.x, hook.y, 240)
+    // Deeper stages have a rising chance to IGNORE whatever easy fish
+    // happens to be drifting by and instead summon a stage-appropriate
+    // (rarer, tougher) biter — so progression is felt in the catch, not
+    // just in the battle tuning.
+    const stageIndex = progression.index
+    const wantHarder = Math.random() < Math.min(0.7, stageIndex * 0.2)
     const ambient: { fish: AmbientFish; def: FishDef } =
-      nearby ??
-      fishSchool.spawnNear(
-        hook.x,
-        hook.y,
-        pickFishForBite(weatherSystem.get(), depth01, Math.random),
-      )
+      nearby && !wantHarder
+        ? nearby
+        : fishSchool.spawnNear(
+            hook.x,
+            hook.y,
+            pickFishForBite(
+              weatherSystem.get(),
+              depth01,
+              Math.random,
+              stageIndex * 0.15,
+            ),
+          )
     this.ctx.activeBiter = { def: ambient.def }
     this.ctx.audio.playBiteAlert()
     this.ctx.goTo(new HookedState(this.ctx), { ambient })

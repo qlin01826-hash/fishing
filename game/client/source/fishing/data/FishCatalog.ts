@@ -198,12 +198,15 @@ export function pickFishForBite(
   weather: WeatherSnapshot,
   depth01: number,
   rng: () => number,
+  extraRareBoost = 0,
 ): FishDef {
   const eligible = FISH_CATALOG.filter(
     (fish) => depth01 >= fish.minDepth && depth01 <= fish.maxDepth,
   )
   const pool = eligible.length > 0 ? eligible : [...FISH_CATALOG]
-  const boost = weather.rareBoost
+  // Stage adds on top of the weather's rare bias so deeper runs throw
+  // rarer (and thus tougher) species at the player.
+  const boost = Math.min(1.5, weather.rareBoost + Math.max(0, extraRareBoost))
   const weights = pool.map((fish) => {
     const base = RARITY_BASE_WEIGHTS[fish.rarity]
     switch (fish.rarity) {

@@ -100,6 +100,12 @@ export class BattleState implements IFishingState {
   private willpower: number
   private readonly initialWillpower: number
 
+  // --- Difficulty (stage-driven) ---
+  /** Effective strictness = max(def.strictness, stage floor). */
+  private readonly effStrictness: number
+  /** Stage timing-window multiplier (>1 widens forgiveness windows). */
+  private readonly windowMul: number
+
   // --- Fish entity ---
   private ambient: AmbientFish | null = null
   private fishTargetX = 0
@@ -147,10 +153,21 @@ export class BattleState implements IFishingState {
     const biter = ctx.activeBiter
     if (!biter) throw new Error('BattleState entered without active biter')
     this.def = biter.def
-    this.willpower = biter.def.willpower
-    this.initialWillpower = biter.def.willpower
+    // Stage sets the difficulty floor. Deep-water fish are tougher,
+    // their windows tighter, their fights longer — regardless of the
+    // individual species that happened to bite.
+    const stage = ctx.progression.stage
+    this.windowMul = stage.windowMul
+    this.effStrictness = Math.max(this.def.strictness, stage.strictnessFloor)
+    // A bigger willpower bar lengthens the patient-play floor (drain is
+    // referenced to the species' BASE willpower, so the multiplier
+    // doesn't just cancel out — see updateWillpowerBackground).
+    this.willpower = biter.def.willpower * stage.willpowerMul
+    this.initialWillpower = this.willpower
     this.followLocksLeft = biter.def.followLocks
-    this.safeHalfBase = Math.max(0.08, 0.18 - this.def.strictness * 0.1)
+    // Wider safe zone on shallow stages (windowMul > 1), tighter in the
+    // abyss. Strictness floor also pinches it on deep fish.
+    this.safeHalfBase = Math.max(0.08, 0.18 - this.effStrictness * 0.1) * stage.windowMul
     this.safeHalf = this.safeHalfBase
     this.pullListener = (j, now) => this.onPullJudgement(j, now)
   }
@@ -180,13 +197,22 @@ export class BattleState implements IFishingState {
     // complex/intense the longer the run goes. Battle 1 opens at intro;
     // battle 4+ opens directly at chorus with key changes available.
     const intensity = this.ctx.weatherSystem.get().intensity
-    const bpm = 88 + Math.round(intensity * 32) // 88..120
+    const stage = this.ctx.progression.stage
+    // Tempo baseline now comes from the STAGE; weather only nudges it a
+    // few BPM either side so the song speed reads as "how deep am I"
+    // rather than "how hungry is the penguin".
+    const bpm = Math.round(stage.bpmBase + (intensity - 0.5) * 12)
     this.ctx.beatClock.setBpm(bpm)
     const startSection = sectionForCatches(this.ctx.catchesThisRun)
     this.ctx.audio.startBeats(intensity, startSection)
+    // start() resets the lane, so apply the stage's chart density range
+    // + reaction speed (look-ahead) AFTER it. Look-ahead only matters in
+    // update()'s spawn horizon, so post-start is the correct moment.
     this.ctx.noteLane.start()
-    // Mirror the audio's starting intensity into the note lane so the
-    // initial chart density matches what the player will be hearing.
+    this.ctx.noteLane.setDensityRange(stage.noteFloor, stage.noteCap)
+    this.ctx.noteLane.setLookAhead(stage.noteLookAheadBeats)
+    // Mirror the audio's starting intensity into the note lane; the
+    // density range above clamps it to the stage's window.
     this.ctx.noteLane.setIntensity(this.ctx.audio.getMusicIntensity())
     this.decayBeatsLeft = 0
     this.lastSeenBeat = this.ctx.beatClock.currentBeat()
@@ -527,7 +553,12 @@ export class BattleState implements IFishingState {
       //
       // Enhanced-beat successes (handled below) shave another ~40-50%
       // off the floor, so realistic battles land at 25-45s.
-      const drainPerSec = this.initialWillpower * (0.025 - this.def.strictness * 0.012)
+      // Drain is referenced to the species' BASE willpower (not the
+      // stage-scaled initial), so a larger willpower bar from
+      // `willpowerMul` genuinely lengthens the patient-play floor
+      // instead of cancelling out. Strictness (with the stage floor)
+      // still slows the drain for tougher fish.
+      const drainPerSec = this.def.willpower * (0.025 - this.effStrictness * 0.012)
       // Fish Frenzy: in-zone drain runs at 3× while the burst is active
       // so the player visibly burns through stamina during the window.
       const mult = this.frenzyActive ? 3 : 1
@@ -740,9 +771,9 @@ export class BattleState implements IFishingState {
     if (wantFollow) {
       this.eventKind = 'follow'
       this.eventTimeMs = 0
-      this.eventWindowMs = 4200 + Math.random() * 1200
+      this.eventWindowMs = (4200 + Math.random() * 1200) * this.windowMul
       this.followLockProgress = 0
-      const radius = 80 - this.def.strictness * 30
+      const radius = (80 - this.effStrictness * 30) * this.windowMul
       if (this.ambient) {
         this.ctx.eventOverlay.showFollow(this.ambient.x, this.ambient.y, radius)
       } else {
@@ -756,7 +787,7 @@ export class BattleState implements IFishingState {
     } else {
       this.eventKind = 'run'
       this.eventTimeMs = 0
-      this.eventWindowMs = 2000 - this.def.strictness * 600
+      this.eventWindowMs = (2000 - this.effStrictness * 600) * this.windowMul
       this.runConsumed = false
       this.runDirection = (['up', 'down', 'left', 'right'] as Direction[])[
         Math.floor(Math.random() * 4)
@@ -897,6 +928,9 @@ export class BattleState implements IFishingState {
 
   private snap(): void {
     this.ctx.audio.playFail()
+    // Feed the skill signal (used by the progression curve in the next
+    // step; harmless no-op on difficulty for now).
+    this.ctx.progression.reportSnap()
     this.ctx.shake(14, 0.6)
     // Worried takes over right as the line snaps — sweat-drop emotes
     // sell the panic better than the previous flat sadness.

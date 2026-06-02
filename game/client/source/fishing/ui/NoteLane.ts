@@ -103,8 +103,15 @@ export class NoteLane {
   /** Counts consecutive auto-missed notes. Reset whenever a hit lands. */
   consecutiveAutoMisses = 0
 
-  /** 0..3 — picked from {@link PATTERNS}. Driven externally by BattleState. */
+  /** 0..(PATTERNS-1) — picked from {@link PATTERNS}. Driven externally by BattleState. */
   private intensity = 0
+  /**
+   * Stage-driven clamp on {@link intensity}. The progression stage sets
+   * these so low stages stay sparse (gentle on-ramp) and deep stages
+   * never drop to a trivial chart. Defaults span the full pattern range.
+   */
+  private densityFloor = 0
+  private densityCap = PATTERNS.length - 1
 
   private beatClock: BeatClock | null = null
 
@@ -112,8 +119,12 @@ export class NoteLane {
   private hitX = 0
   private laneY = 0
   private laneLength = 360
-  /** Beats of look-ahead (notes appear this many beats before their hit moment). */
-  private readonly lookAheadBeats = 2
+  /**
+   * Beats of look-ahead (notes appear this many beats before their hit
+   * moment). Lower = notes arrive later = less reaction time = harder.
+   * Stage-driven via {@link setLookAhead}; defaults to the baseline 2.
+   */
+  private lookAheadBeats = 2
 
   // Timing window for matching a tap to a note. Must match PullPanel's
   // `goodWindowMs` so the player can never receive a Good judgement
@@ -171,7 +182,33 @@ export class NoteLane {
    * retroactively into the look-ahead window.
    */
   setIntensity(level: number): void {
-    this.intensity = Math.max(0, Math.min(PATTERNS.length - 1, Math.round(level)))
+    const hardMax = PATTERNS.length - 1
+    const cap = Math.min(hardMax, this.densityCap)
+    const floor = Math.max(0, Math.min(cap, this.densityFloor))
+    this.intensity = Math.max(floor, Math.min(cap, Math.round(level)))
+  }
+
+  /**
+   * Stage-driven density clamp. `floor` keeps deep-water charts from
+   * ever going trivially sparse; `cap` keeps the early on-ramp gentle.
+   * Re-applies the clamp to the current intensity immediately.
+   */
+  setDensityRange(floor: number, cap: number): void {
+    const hardMax = PATTERNS.length - 1
+    this.densityCap = Math.max(0, Math.min(hardMax, Math.round(cap)))
+    this.densityFloor = Math.max(0, Math.min(this.densityCap, Math.round(floor)))
+    // Re-clamp the live intensity to the new range.
+    this.setIntensity(this.intensity)
+  }
+
+  /**
+   * Set note look-ahead in beats (reaction-time difficulty lever).
+   * Lower values make notes appear later and travel the lane faster.
+   * Call AFTER {@link start} — start() resets this to the default, and
+   * the value is only consulted in update()'s spawn horizon.
+   */
+  setLookAhead(beats: number): void {
+    this.lookAheadBeats = Math.max(0.75, Math.min(4, beats))
   }
 
   /** Halt note spawning + clear remaining notes (with a fade). */
@@ -198,6 +235,9 @@ export class NoteLane {
     this.particles = []
     this.consecutiveAutoMisses = 0
     this.intensity = 0
+    this.densityFloor = 0
+    this.densityCap = PATTERNS.length - 1
+    this.lookAheadBeats = 2
     this.nextSpawnSlot = 0
     this.missText.alpha = 0
   }

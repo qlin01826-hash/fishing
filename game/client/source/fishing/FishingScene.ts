@@ -31,6 +31,7 @@ import { FrenzyOverlay } from './ui/FrenzyOverlay'
 import { HungerSystem } from './systems/HungerSystem'
 import { WeatherSystem } from './systems/WeatherSystem'
 import { TimeOfDaySystem } from './systems/TimeOfDaySystem'
+import { ProgressionSystem } from './systems/ProgressionSystem'
 import { AudioSystem } from './systems/AudioSystem'
 import { PointerTracker } from './systems/PointerTracker'
 import { BeatClock } from './systems/BeatClock'
@@ -96,6 +97,7 @@ export class FishingScene implements GameScene {
   private readonly hungerSystem = new HungerSystem()
   private readonly weatherSystem = new WeatherSystem()
   private readonly timeOfDay = new TimeOfDaySystem()
+  private readonly progression = new ProgressionSystem()
   private readonly audio = new AudioSystem()
   private readonly pointer = new PointerTracker()
   private readonly beatClock = new BeatClock()
@@ -561,6 +563,7 @@ export class FishingScene implements GameScene {
       audio: this.audio,
       pointer: this.pointer,
       beatClock: this.beatClock,
+      progression: this.progression,
       get sessionScore() {
         return scene.sessionScore
       },

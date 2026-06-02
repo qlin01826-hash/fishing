@@ -1,3 +1,4 @@
+import { t } from '@minigame/i18n'
 import type { IFishingState } from '../StateMachine'
 import type { FishingContext } from '../FishingContext'
 import type { FishingStateId } from '../types'
@@ -28,9 +29,16 @@ export class SailingState implements IFishingState {
     // and the post-catch return). The penguin's mood reflects hunger.
     if (!this.ctx.commissionFish) {
       this.ctx.commissionFish = pickCommissionFish(this.ctx.hungerSystem.getHunger(), Math.random)
-      this.ctx.penguin.showRequest(this.ctx.commissionFish)
-    } else {
-      this.ctx.penguin.showRequest(this.ctx.commissionFish)
+    }
+    this.ctx.penguin.showRequest(this.ctx.commissionFish)
+
+    // If the catch we just landed pushed us into a new sea area,
+    // announce it now. The transient message shows over the commission
+    // request, then falls back to the request once its timer expires.
+    if (this.ctx.progression.consumeStageUp()) {
+      const stageName = t(`stage.${this.ctx.progression.stage.name}`)
+      this.ctx.penguin.showMessage(t('game.enterStage', { name: stageName }), 'excited', 2600)
+      this.ctx.shake(5, 0.4)
     }
   }
 
