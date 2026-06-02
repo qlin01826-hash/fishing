@@ -410,7 +410,15 @@ export class FishingScene implements GameScene {
 
   onResize(width: number, height: number): void {
     const waterLineY = Math.round(height * 0.42)
-    const maxDepth = height - waterLineY - 160
+    // Reserve room at the bottom for the on-screen controls — but scale
+    // it with height instead of a fixed 160px. On short LANDSCAPE PHONE
+    // viewports (height ~430) a fixed 160 ate ~37% of the screen, which
+    // crushed the underwater column so every fish bunched up just below
+    // the surface (and looked like it was floating ON the water). A
+    // height-proportional reserve keeps a usable water column on phones
+    // while staying generous on tall desktop windows.
+    const bottomReserve = Math.round(Math.max(64, Math.min(150, height * 0.18)))
+    const maxDepth = Math.max(150, height - waterLineY - bottomReserve)
     this.viewport = { width, height, waterLineY, maxDepth }
     this.ocean.setViewport(this.viewport)
     this.castPreview.setViewport(this.viewport)
@@ -492,6 +500,9 @@ export class FishingScene implements GameScene {
   private handlePointerDown(e: PointerEvent): void {
     // Audio unlock: must happen inside a user gesture
     this.audio.unlock()
+    // Kick off the always-on groove bed so the player hears continuous
+    // music from the very first tap (not just during fights). Idempotent.
+    this.audio.startGrooveBed()
     this.engine.app.canvas.setPointerCapture?.(e.pointerId)
     const { x, y } = this.toCanvas(e)
     this.stateMachine.pointerDown(x, y, e.pointerId)

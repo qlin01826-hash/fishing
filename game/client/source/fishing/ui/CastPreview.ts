@@ -3,13 +3,14 @@ import { t } from '@minigame/i18n'
 import type { ViewportContext } from '../types'
 
 /**
- * The realtime cast preview UI:
- * - Parabola dotted arc from rod tip to predicted landing
- * - Landing impact ring at the splash point
- * - Power bar + power % label near the bottom
+ * Cast-related UI:
+ * - A beat-synced "tap to cast" cue ring on the rod tip while idling at
+ *   sea (driven by `SailingState`) — the player taps on its flash.
+ * - (Legacy) parabola arc / landing ring / power bar helpers, kept for
+ *   any future aimed-cast mode.
  *
- * Pure UI: it takes inputs from `CastingState` (rod tip, velocity vec)
- * and renders. It does NOT decide whether the cast is valid.
+ * Pure UI: callers feed it positions/power; it does NOT decide whether a
+ * cast is valid.
  */
 export class CastPreview {
   readonly container = new Container()
@@ -19,6 +20,8 @@ export class CastPreview {
   private readonly powerBg = new Graphics()
   private readonly powerFill = new Graphics()
   private readonly powerLabel: Text
+  /** Beat-synced "tap now" cue ring shown while idling at sea. */
+  private readonly beatCue = new Graphics()
 
   private viewport: ViewportContext
 
@@ -34,7 +37,14 @@ export class CastPreview {
       }),
     })
     this.powerLabel.anchor.set(0.5, 0)
-    this.container.addChild(this.arc, this.ring, this.powerBg, this.powerFill, this.powerLabel)
+    this.container.addChild(
+      this.beatCue,
+      this.arc,
+      this.ring,
+      this.powerBg,
+      this.powerFill,
+      this.powerLabel,
+    )
     this.setVisible(false)
   }
 
@@ -53,6 +63,31 @@ export class CastPreview {
     this.powerFill.clear()
     this.powerBg.clear()
     this.powerLabel.text = ''
+    this.beatCue.clear()
+  }
+
+  /**
+   * Draw the beat-synced "tap to cast" cue at the rod tip. `pulse` is
+   * 1.0 right on the beat and eases to 0 between beats — the ring flashes
+   * bright + large exactly on each beat, so the player learns to tap on
+   * the flash for a perfect on-beat cast.
+   */
+  showBeatCue(x: number, y: number, pulse: number): void {
+    this.setVisible(true)
+    const g = this.beatCue
+    g.clear()
+    const p = Math.max(0, Math.min(1, pulse))
+    const baseR = 16
+    const r = baseR * (1 + p * 0.7)
+    // Outer flashing ring — the "hit window" the player aims their tap at.
+    g.circle(x, y, r)
+    g.stroke({ color: 0xffe07a, width: 2 + p * 2, alpha: 0.35 + p * 0.6 })
+    // Bright core dot pops on the downbeat.
+    g.circle(x, y, 3 + p * 3)
+    g.fill({ color: 0xffffff, alpha: 0.4 + p * 0.55 })
+    // Fixed inner target so the player has a reference size to match.
+    g.circle(x, y, baseR * 0.75)
+    g.stroke({ color: 0xffe07a, width: 1.5, alpha: 0.5 })
   }
 
   /**

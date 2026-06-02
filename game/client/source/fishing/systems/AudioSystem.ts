@@ -68,6 +68,15 @@ export class AudioSystem {
 
   // ---- Song state ----
   private currentSection: Section = 'intro'
+  /**
+   * The resting "groove bed" the song never relaxes below. It ratchets
+   * UP as the player lands fish (verse → preChorus → chorus) and never
+   * drops during a session, so the soundtrack is continuous and grows
+   * monotonically richer the longer/deeper you play. Battles lift the
+   * song ABOVE this; ending a fight relaxes back DOWN to it (never to
+   * silence).
+   */
+  private sectionFloor: Section = 'verse'
   /** Set during a beat schedule; applied on next bar boundary. */
   private pendingSection: Section | null = null
   /** Number of beats spent in the current section (used to auto-leave intro). */
@@ -176,6 +185,7 @@ export class AudioSystem {
     this.drumsActive = false
     this.currentSection = 'intro'
     this.pendingSection = null
+    this.sectionFloor = 'verse'
     this.keyOffsetSemis = 0
     this.consecutiveChorusBumps = 0
     if (this.schedulerHandle !== null) {
@@ -245,12 +255,74 @@ export class AudioSystem {
     if (!this.drumsActive) return this.getMusicIntensity()
     const cur = this.pendingSection ?? this.currentSection
     const next = SECTION_DECAY[cur]
+    // Never relax below the earned resting bed — the groove stays alive
+    // and as rich as the player has unlocked this session.
+    if (SECTION_RANK[next] < SECTION_RANK[this.sectionFloor]) next = this.sectionFloor
     if (next !== cur) {
       this.pendingSection = next
       this.keyOffsetSemis = 0
       this.consecutiveChorusBumps = 0
     }
     return SECTION_PROFILES[next].noteDensity
+  }
+
+  // ---- Continuous groove bed ----
+
+  /**
+   * Start (or keep) the always-on base groove so the player ALWAYS hears
+   * music — not just during a fight. Idempotent: safe to call on every
+   * user gesture. If the song is already running it just makes sure it's
+   * at least at the resting bed.
+   */
+  startGrooveBed(): void {
+    if (this.drumsActive) {
+      this.raiseToAtLeast(this.sectionFloor)
+      return
+    }
+    this.startBeats(0, this.sectionFloor)
+  }
+
+  /**
+   * Ratchet the resting bed richness UP (verse → preChorus → chorus).
+   * Called as the player lands fish so the arrangement gains layers and
+   * never thins back out. Lowering is ignored to keep the build monotonic
+   * across a session.
+   */
+  setSectionFloor(section: Section): void {
+    if (SECTION_RANK[section] <= SECTION_RANK[this.sectionFloor]) return
+    this.sectionFloor = section
+    this.raiseToAtLeast(section)
+  }
+
+  /**
+   * Lift the song up to AT LEAST `section` for an intense moment (e.g.
+   * a battle). Never lowers what's already playing.
+   */
+  riseToSection(section: Section): void {
+    this.raiseToAtLeast(section)
+  }
+
+  /**
+   * Ease the song back down to the resting bed when a fight ends. Keeps
+   * the groove playing — it NEVER silences between fights.
+   */
+  relaxToBed(): void {
+    if (!this.drumsActive) return
+    const cur = this.pendingSection ?? this.currentSection
+    if (SECTION_RANK[cur] > SECTION_RANK[this.sectionFloor]) {
+      this.pendingSection = this.sectionFloor
+      this.keyOffsetSemis = 0
+      this.consecutiveChorusBumps = 0
+    }
+  }
+
+  /** Schedule a rise to `section` only if the song is currently lower. */
+  private raiseToAtLeast(section: Section): void {
+    if (!this.drumsActive) return
+    const cur = this.pendingSection ?? this.currentSection
+    if (SECTION_RANK[cur] < SECTION_RANK[section]) {
+      this.pendingSection = section
+    }
   }
 
   // ---- One-shot SFX ----
@@ -1269,6 +1341,35 @@ export function sectionForStage(stageIndex: number): Section {
   if (stageIndex >= 3) return 'preChorus'
   if (stageIndex >= 1) return 'verse'
   return 'intro'
+}
+
+/**
+ * The RESTING bed richness for a given depth stage — what the song
+ * relaxes to between fights. Always trails the in-battle section so a
+ * fight still feels like a lift, but climbs with depth so the bed gets
+ * permanently richer as the run progresses.
+ *
+ *   stage 0–1 : verse     (base: four-on-floor + ~3 instruments)
+ *   stage 2–4 : preChorus (build-up layers added)
+ *   stage 5+  : chorus     (full arrangement is the new resting state)
+ */
+export function bedFloorForStage(stageIndex: number): Section {
+  if (stageIndex >= 5) return 'chorus'
+  if (stageIndex >= 2) return 'preChorus'
+  return 'verse'
+}
+
+/**
+ * Coarse rank for comparing section "richness" (intro < verse/bridge <
+ * preChorus < chorus). Used to keep the resting bed monotonic and to
+ * decide whether to raise/lower the song without restarting it.
+ */
+const SECTION_RANK: Record<Section, number> = {
+  intro: 0,
+  verse: 1,
+  bridge: 1,
+  preChorus: 2,
+  chorus: 3,
 }
 
 type DrumPattern = 'sparse' | 'four' | 'four-plus' | 'driving' | 'half-time'

@@ -207,7 +207,12 @@ export class BattleState implements IFishingState {
     // opens the fight in a richer section so the arrangement escalates
     // as the player descends the 15-stage ladder.
     const startSection = sectionForStage(stage.index)
-    this.ctx.audio.startBeats(intensity, startSection)
+    // The groove bed is already running continuously; LIFT it up to the
+    // battle section instead of (re)starting the song, so there's no gap
+    // or restart pop when a fight begins. startGrooveBed() is a safety
+    // net in case audio only just unlocked this very frame.
+    this.ctx.audio.startGrooveBed()
+    this.ctx.audio.riseToSection(startSection)
     // start() resets the lane, so apply the stage's chart density range
     // + reaction speed (look-ahead) AFTER it. Look-ahead only matters in
     // update()'s spawn horizon, so post-start is the correct moment.
@@ -290,7 +295,9 @@ export class BattleState implements IFishingState {
     this.ctx.noteLane.container.visible = false
     this.ctx.noteLane.stop()
     this.ctx.eventOverlay.hide()
-    this.ctx.audio.stopBeats()
+    // Don't silence the song when the fight ends — ease it back down to
+    // the continuous resting bed so sailing/waiting still has music.
+    this.ctx.audio.relaxToBed()
     this.ctx.pullPanel.setStruggling(false)
     // Drop the frenzy celebration immediately on exit so a stale
     // overlay doesn't linger on the result banner / sailing scene.

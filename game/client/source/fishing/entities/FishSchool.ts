@@ -168,7 +168,7 @@ export class FishSchool {
         : FISH_CATALOG[0]
       const fromLeft = Math.random() < 0.5
       const x = fromLeft ? -30 : width + 30
-      const y = waterLineY + 14 + shallowDepth * (maxDepth - 28)
+      const y = waterLineY + 30 + shallowDepth * (maxDepth - 46)
       const fish = this.makeFish(def, x, y)
       fish.vx = (fromLeft ? 1 : -1) * (35 + Math.random() * 35)
       fish.homeY = y
@@ -188,7 +188,7 @@ export class FishSchool {
       const depth = def.minDepth + Math.random() * (def.maxDepth - def.minDepth)
       const fromLeft = Math.random() < 0.5
       const x = fromLeft ? -30 : width + 30
-      const y = waterLineY + 14 + depth * (maxDepth - 28)
+      const y = waterLineY + 30 + depth * (maxDepth - 46)
       const fish = this.makeFish(def, x, y)
       // Big fish swim a bit more deliberately than the surface dancers.
       fish.vx = (fromLeft ? 1 : -1) * (22 + Math.random() * 24)
@@ -501,7 +501,7 @@ export class FishSchool {
       : FISH_CATALOG[0]
     const fromLeft = Math.random() < 0.5
     const x = fromLeft ? -30 : width + 30
-    const y = waterLineY + 14 + biasedDepth * (maxDepth - 28)
+    const y = waterLineY + 30 + biasedDepth * (maxDepth - 46)
     const fish = this.makeFish(def, x, y)
     fish.vx = (fromLeft ? 1 : -1) * (18 + Math.random() * 30)
     fish.homeY = y
