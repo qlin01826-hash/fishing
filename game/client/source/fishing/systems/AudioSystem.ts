@@ -254,7 +254,7 @@ export class AudioSystem {
   decayMusicIntensity(): number {
     if (!this.drumsActive) return this.getMusicIntensity()
     const cur = this.pendingSection ?? this.currentSection
-    const next = SECTION_DECAY[cur]
+    let next = SECTION_DECAY[cur]
     // Never relax below the earned resting bed — the groove stays alive
     // and as rich as the player has unlocked this session.
     if (SECTION_RANK[next] < SECTION_RANK[this.sectionFloor]) next = this.sectionFloor
@@ -314,6 +314,18 @@ export class AudioSystem {
       this.keyOffsetSemis = 0
       this.consecutiveChorusBumps = 0
     }
+  }
+
+  /**
+   * Re-anchor the beat scheduler after the clock's tempo was rebased.
+   * `BeatClock.setBpm()` rebases `audioStart`, which strands the running
+   * scheduler's `nextScheduledBeat` (an absolute beat index from the OLD
+   * timeline) far in the future — so the groove silently STOPS emitting
+   * beats. Call this right after any `setBpm()` while the bed is playing.
+   */
+  resyncScheduler(): void {
+    if (!this.ctx || !this.beatClock || !this.drumsActive) return
+    this.nextScheduledBeat = this.beatClock.nextBeatAfter(this.ctx.currentTime)
   }
 
   /** Schedule a rise to `section` only if the song is currently lower. */

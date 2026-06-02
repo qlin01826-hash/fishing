@@ -57,14 +57,14 @@ export class SailingState implements IFishingState {
     else this.ctx.penguin.setMood('request')
 
     // Beat-synced cast cue: flash a ring at the rod tip on every beat so
-    // the player can tap ON the beat for a perfect cast. Only meaningful
-    // once the clock is running (after the first gesture unlocks audio).
+    // the player can tap ON the beat for a perfect cast. Before audio is
+    // unlocked (no clock yet) we still show a gentle static ring so the
+    // very first cast has a visible "tap here" affordance.
     const clock = this.ctx.beatClock
-    if (clock.started) {
-      const phase = clock.phase()
-      const pulse = phase < 0.25 ? 1 - phase / 0.25 : 0
-      this.ctx.castPreview.showBeatCue(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY, pulse)
-    }
+    const pulse = clock.started
+      ? (clock.phase() < 0.25 ? 1 - clock.phase() / 0.25 : 0)
+      : 0.3
+    this.ctx.castPreview.showBeatCue(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY, pulse)
   }
 
   onPointerDown(_x: number, _y: number, _pointerId: number): void {

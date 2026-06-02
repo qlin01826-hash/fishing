@@ -212,6 +212,10 @@ export class BattleState implements IFishingState {
     // or restart pop when a fight begins. startGrooveBed() is a safety
     // net in case audio only just unlocked this very frame.
     this.ctx.audio.startGrooveBed()
+    // setBpm() above rebased the beat clock; the bed was already running
+    // from sailing, so re-anchor the scheduler or it would stall and the
+    // music would cut out the moment the fight starts.
+    this.ctx.audio.resyncScheduler()
     this.ctx.audio.riseToSection(startSection)
     // start() resets the lane, so apply the stage's chart density range
     // + reaction speed (look-ahead) AFTER it. Look-ahead only matters in
