@@ -343,6 +343,29 @@ export class AudioSystem {
     this.shortPing(880, 0.07, 'square', 0.18)
   }
 
+  /**
+   * Lure call-and-response notes. The game "sings" a short motif and the
+   * player echoes each hit. Pentatonic keeps any echo pleasant even when
+   * slightly off, which suits the zero-stakes luring phase.
+   */
+  private readonly lureScale = [523.25, 587.33, 659.25, 783.99, 880.0] // C5 D5 E5 G5 A5
+
+  playLureCall(step = 0): void {
+    this.shortPing(this.lureScale[step % this.lureScale.length], 0.18, 'triangle', 0.3)
+  }
+
+  playLureEcho(step = 0, good = true): void {
+    const base = this.lureScale[step % this.lureScale.length]
+    this.shortPing(good ? base * 2 : base * 0.5, 0.14, good ? 'sine' : 'sawtooth', good ? 0.26 : 0.16)
+  }
+
+  /** Fish takes the lure — bright ascending three-note "got one!" sparkle. */
+  playLureSuccess(): void {
+    this.shortPing(659.25, 0.12, 'triangle', 0.26)
+    setTimeout(() => this.shortPing(880.0, 0.12, 'triangle', 0.26), 90)
+    setTimeout(() => this.shortPing(1174.66, 0.18, 'triangle', 0.3), 180)
+  }
+
   playCast(power: number): void {
     if (!this.ctx || !this.master) return
     const ctx = this.ctx

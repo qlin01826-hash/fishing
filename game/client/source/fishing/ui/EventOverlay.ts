@@ -28,7 +28,7 @@ export class EventOverlay {
   private readonly ring = new Graphics()
   private readonly progressArc = new Graphics()
 
-  private mode: 'idle' | 'follow' | 'run' | 'strike' | 'message' = 'idle'
+  private mode: 'idle' | 'follow' | 'run' | 'strike' | 'message' | 'lure' = 'idle'
   private pulsePhase = 0
   /** Position of the highlighted fish, used for the follow ring. */
   ringX = 0
@@ -36,6 +36,11 @@ export class EventOverlay {
   ringRadius = 60
   private followProgress = 0
   private runDirection: Direction = 'up'
+  // ---- Lure call-and-response state (drawn as a row of beat pips) ----
+  private lurePattern: boolean[] = []
+  private lurePhase: 'call' | 'listen' = 'call'
+  private lureActiveBeat = -1
+  private lureEchoes: Array<'none' | 'good' | 'miss'> = []
   /** Center of the screen (for big text). */
   private centerX = 0
   private centerY = 0
@@ -92,6 +97,50 @@ export class EventOverlay {
     this.ring.clear()
     this.progressArc.clear()
     this.followProgress = 0
+  }
+
+  /**
+   * Enter the lure call-and-response display. The owner (WaitingState)
+   * then drives it each round via {@link setLureState}. Rendered as a
+   * horizontal row of beat pips with a headline above.
+   */
+  showLure(): void {
+    this.mode = 'lure'
+    this.lurePattern = []
+    this.lureEchoes = []
+    this.lureActiveBeat = -1
+    this.lurePhase = 'call'
+    this.bigText.text = ''
+    this.subText.text = ''
+    this.arrow.clear()
+    this.ring.clear()
+    this.progressArc.clear()
+  }
+
+  /**
+   * Update the lure display for the current round.
+   * @param pattern  which beats in the bar are "hits" to echo
+   * @param phase    'call' = game demoing, 'listen' = player echoing
+   * @param activeBeat index of the beat currently sounding (-1 = none)
+   * @param echoes   per-beat player result during the listen phase
+   * @param headline localized prompt text
+   * @param headlineColor css colour for the headline
+   */
+  setLureState(
+    pattern: boolean[],
+    phase: 'call' | 'listen',
+    activeBeat: number,
+    echoes: Array<'none' | 'good' | 'miss'>,
+    headline: string,
+    headlineColor: string,
+  ): void {
+    if (this.mode !== 'lure') return
+    this.lurePattern = pattern
+    this.lurePhase = phase
+    this.lureActiveBeat = activeBeat
+    this.lureEchoes = echoes
+    this.bigText.text = headline
+    this.bigText.style.fill = headlineColor
   }
 
   showStrike(): void {
@@ -179,9 +228,62 @@ export class EventOverlay {
       this.drawArrow(this.runDirection)
     } else if (this.mode === 'strike') {
       this.bigText.scale.set(1 + pulse * 0.15)
+    } else if (this.mode === 'lure') {
+      this.drawLure(pulse)
     } else {
       this.bigText.scale.set(1)
     }
+  }
+
+  private drawLure(pulse: number): void {
+    const n = this.lurePattern.length
+    const g = this.ring
+    g.clear()
+    this.progressArc.clear()
+    this.arrow.clear()
+    if (n === 0) {
+      this.bigText.scale.set(1)
+      return
+    }
+    const spacing = 60
+    const totalW = (n - 1) * spacing
+    const startX = this.centerX - totalW / 2
+    const y = this.centerY + 24
+    for (let i = 0; i < n; i += 1) {
+      const x = startX + i * spacing
+      const isHit = this.lurePattern[i]
+      const isActive = i === this.lureActiveBeat
+      const echo = this.lureEchoes[i] ?? 'none'
+      let color = isHit ? 0xffd166 : 0x335577
+      let radius = isHit ? 15 : 8
+      let alpha = isHit ? 0.5 : 0.32
+      if (this.lurePhase === 'call') {
+        if (isActive && isHit) {
+          alpha = 1
+          radius += 7
+        }
+      } else {
+        if (echo === 'good') {
+          color = 0x6ee06e
+          alpha = 1
+        } else if (echo === 'miss') {
+          color = 0xff6b6b
+          alpha = 0.9
+        } else {
+          alpha = isHit ? 0.6 : 0.3
+        }
+      }
+      const r = radius * (isActive ? 1 + pulse * 0.18 : 1)
+      g.circle(x, y, r)
+      g.fill({ color, alpha })
+      g.stroke({ color: 0x000000, width: 2, alpha: 0.4 })
+      if (this.lurePhase === 'listen' && isActive) {
+        g.circle(x, y, r + 9)
+        g.stroke({ color: 0xffffff, width: 3, alpha: 0.45 + pulse * 0.4 })
+      }
+    }
+    this.bigText.position.set(this.centerX, this.centerY - 46)
+    this.bigText.scale.set(1 + pulse * 0.06)
   }
 
   private drawArrow(direction: Direction): void {
