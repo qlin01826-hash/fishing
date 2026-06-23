@@ -3,7 +3,6 @@ import type { IFishingState } from '../StateMachine'
 import type { FishingContext } from '../FishingContext'
 import type { FishDef, FishingStateId } from '../types'
 import { FISHING_CONSTANTS } from '../types'
-import { bedFloorForStage } from '../systems/AudioSystem'
 import { SailingState } from './SailingState'
 
 interface CatchPayload {
@@ -52,14 +51,17 @@ export class CatchState implements IFishingState {
     // Count this successful catch — drives where the next battle's
     // song starts (a more advanced section / more complex arrangement).
     this.ctx.catchesThisRun += 1
-    // Advance the difficulty ladder one stage (every catch = one stage,
-    // 15 total). Crossing into a new named zone gets announced by
-    // SailingState on the way back out (it polls consumeZoneUp()).
-    this.ctx.progression.reportCatch()
-    // Ratchet the continuous music bed UP a notch as the run deepens, so
-    // the soundtrack keeps gaining instruments/layers and never thins
-    // back out — the song grows monotonically richer the more you catch.
-    this.ctx.audio.setSectionFloor(bedFloorForStage(this.ctx.progression.index))
+    // Broadcast the catch as a single fact. Cross-system reactions —
+    // advancing the difficulty ladder, ratcheting the music bed, and any
+    // future achievements/combos — are wired up in FishingScene as
+    // subscribers, so this state never has to know about them. (Crossing
+    // into a new named zone gets announced by SailingState on the way
+    // back out, which polls consumeZoneUp().)
+    this.ctx.events.emit('fishCaught', {
+      def: this.def,
+      score,
+      commissionFulfilled,
+    })
 
     this.ctx.catchBanner.show(
       this.ctx.viewport.width,

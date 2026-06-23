@@ -1,7 +1,10 @@
 import { Container } from 'pixi.js'
 import type { GameScene } from '../engine/Engine'
 import { Engine } from '../engine/Engine'
+import { EventBus } from '../engine/EventBus'
 import type { FishingContext } from './FishingContext'
+import type { FishingEvents } from './events'
+import { bedFloorForStage } from './systems/AudioSystem'
 import { StateMachine, type IFishingState } from './StateMachine'
 import type { FishDef, ViewportContext } from './types'
 
@@ -105,6 +108,7 @@ export class FishingScene implements GameScene {
   private readonly audio = new AudioSystem()
   private readonly pointer = new PointerTracker()
   private readonly beatClock = new BeatClock()
+  private readonly events = new EventBus<FishingEvents>()
 
   // Session state
   private sessionScore = 0
@@ -161,6 +165,18 @@ export class FishingScene implements GameScene {
     this.audio.attachBeatClock(this.beatClock)
     this.pullPanel.attachBeatClock(this.beatClock)
     this.noteLane.attachBeatClock(this.beatClock)
+
+    // Cross-system reactions to "a fish was caught" live here (the
+    // composition root), not inside CatchState. Adding a new reaction
+    // (achievement, combo, stat…) means subscribing here — CatchState
+    // just emits the fact and never grows.
+    this.events.on('fishCaught', () => {
+      // Advance the difficulty ladder one stage (every catch = one stage).
+      this.progression.reportCatch()
+      // Ratchet the continuous music bed UP a notch so the arrangement
+      // gains layers and never thins back out as the run deepens.
+      this.audio.setSectionFloor(bedFloorForStage(this.progression.index))
+    })
 
     // Render order — ocean & sky underneath, then underwater, then above
     this.rootContainer.addChild(this.skyContainer)
@@ -486,6 +502,7 @@ export class FishingScene implements GameScene {
     window.removeEventListener('keyup', this.onKeyUp)
     this.stateMachine.destroy()
     this.audio.destroy()
+    this.events.clear()
     this.rootContainer.removeFromParent()
     this.rootContainer.destroy({ children: true })
   }
@@ -594,6 +611,7 @@ export class FishingScene implements GameScene {
       pointer: this.pointer,
       beatClock: this.beatClock,
       progression: this.progression,
+      events: this.events,
       get sessionScore() {
         return scene.sessionScore
       },

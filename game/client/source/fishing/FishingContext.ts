@@ -24,6 +24,7 @@ import type { AudioSystem } from './systems/AudioSystem'
 import type { PointerTracker } from './systems/PointerTracker'
 import type { BeatClock } from './systems/BeatClock'
 import type { ProgressionSystem } from './systems/ProgressionSystem'
+import type { FishingEventBus } from './events'
 
 /**
  * Read/write surface that the per-state classes use to talk to the
@@ -64,6 +65,12 @@ export interface FishingContext {
    * stage climbs with catches and sets the floor on every battle knob.
    */
   readonly progression: ProgressionSystem
+  /**
+   * Typed pub/sub bus for gameplay facts (e.g. `fishCaught`). Emit from
+   * the place an event happens; subscribe in FishingScene setup so new
+   * mechanics don't bloat the emitter.
+   */
+  readonly events: FishingEventBus
   // Session state
   /** Score for the current play session. */
   sessionScore: number
