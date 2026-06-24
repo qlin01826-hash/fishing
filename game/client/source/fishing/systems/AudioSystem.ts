@@ -130,9 +130,12 @@ export class AudioSystem {
   private packV1StartTime = 0
   private transitionPlayingForNextBar = false
 
-  /** Call from a user gesture (e.g. pointerdown). Safe to call repeatedly. */
-  unlock(): void {
-    if (this.unlocked) return
+  constructor() {
+    this.preInit()
+  }
+
+  private preInit(): void {
+    if (this.ctx) return
     try {
       const AC =
         (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
@@ -153,12 +156,27 @@ export class AudioSystem {
       this.choirGain = this.makeBus(0)
       this.bellGain = this.makeBus(0)
       this.leadGain = this.makeBus(0)
-      this.unlocked = true
       this.startStorm()
       this.startStringPad()
       this.loadPackV1()
-      if (this.beatClock && !this.beatClock.started) {
-        this.beatClock.start(this.ctx.currentTime)
+    } catch (err) {
+      console.warn("Pre-initializing AudioContext failed or was blocked by autoplay policy:", err)
+    }
+  }
+
+  /** Call from a user gesture (e.g. pointerdown). Safe to call repeatedly. */
+  unlock(): void {
+    if (this.unlocked) return
+    try {
+      this.preInit()
+      if (this.ctx) {
+        if (this.ctx.state === 'suspended') {
+          this.ctx.resume().catch((err) => console.error("Failed to resume AudioContext", err))
+        }
+        this.unlocked = true
+        if (this.beatClock && !this.beatClock.started) {
+          this.beatClock.start(this.ctx.currentTime)
+        }
       }
     } catch {
       this.unlocked = false
@@ -247,6 +265,9 @@ export class AudioSystem {
         if (!url) return
         try {
           const res = await window.fetch(url)
+          if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`)
+          }
           const arrayBuffer = await res.arrayBuffer()
           if (this.ctx) {
             const buffer = await this.ctx.decodeAudioData(arrayBuffer)
@@ -258,8 +279,8 @@ export class AudioSystem {
       })
       await Promise.all(promises)
       
-      // If we loaded files successfully, mark packV1 as loaded and enforce BPM = 88
-      if (this.packV1Buffers.size > 0) {
+      // If we loaded files successfully (all 5 stems must be decoded), mark packV1 as loaded and enforce BPM = 88
+      if (this.packV1Buffers.size === 5) {
         this.packV1Loaded = true
         if (this.beatClock) {
           this.beatClock.setBpm(88)

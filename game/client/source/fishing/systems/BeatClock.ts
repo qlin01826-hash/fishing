@@ -23,6 +23,7 @@ export class BeatClock {
   private _beatIntervalMs = 60_000 / 92
   private perfStart = 0
   private audioStart = 0
+  private accumulatedBeats = 0
 
   /** True once `start()` has run (audio context unlocked). */
   started = false
@@ -31,6 +32,7 @@ export class BeatClock {
     if (this.started) return
     this.perfStart = now
     this.audioStart = audioCurrentTimeSeconds
+    this.accumulatedBeats = 0
     this.started = true
   }
 
@@ -38,19 +40,25 @@ export class BeatClock {
    * Re-anchor the clock with a new BPM without breaking the current
    * beat's phase. Used when weather intensity shifts.
    */
-  setBpm(bpm: number): void {
+  setBpm(bpm: number, audioCurrentTimeSeconds?: number): void {
     this.targetBpm = bpm
     if (!this.started) {
       this.bpm = bpm
       this._beatIntervalMs = 60_000 / bpm
       return
     }
-    // Rebase so the NEXT beat lands exactly when it would have without
-    // a BPM change. Keeps drums and visuals continuous.
+    // Record current fractional beats at the old BPM before rebasing
     const now = performance.now()
-    const elapsedSec = (now - this.perfStart) / 1000
-    this.audioStart = this.audioStart + elapsedSec
+    const elapsedPerfMs = now - this.perfStart
+    const beatsSinceTransition = elapsedPerfMs / this._beatIntervalMs
+    this.accumulatedBeats = this.accumulatedBeats + beatsSinceTransition
+    
     this.perfStart = now
+    if (audioCurrentTimeSeconds !== undefined) {
+      this.audioStart = audioCurrentTimeSeconds
+    } else {
+      this.audioStart = this.audioStart + (elapsedPerfMs / 1000)
+    }
     this.bpm = bpm
     this._beatIntervalMs = 60_000 / bpm
   }
@@ -71,8 +79,9 @@ export class BeatClock {
   phase(now = performance.now()): number {
     if (!this.started) return 0
     const elapsed = now - this.perfStart
-    const m = ((elapsed % this._beatIntervalMs) + this._beatIntervalMs) % this._beatIntervalMs
-    return m / this._beatIntervalMs
+    const beatsSinceTransition = elapsed / this._beatIntervalMs
+    const absoluteBeat = this.accumulatedBeats + beatsSinceTransition
+    return absoluteBeat % 1
   }
 
   /**
@@ -84,42 +93,53 @@ export class BeatClock {
   msFromNearestBeat(now = performance.now()): number {
     if (!this.started) return Number.POSITIVE_INFINITY
     const elapsed = now - this.perfStart
-    const beat = Math.round(elapsed / this._beatIntervalMs)
-    return elapsed - beat * this._beatIntervalMs
+    const beatsSinceTransition = elapsed / this._beatIntervalMs
+    const absoluteBeat = this.accumulatedBeats + beatsSinceTransition
+    const nearestBeat = Math.round(absoluteBeat)
+    return (absoluteBeat - nearestBeat) * this._beatIntervalMs
   }
 
   /** Integer beat index for a given perf time. */
   currentBeat(now = performance.now()): number {
     if (!this.started) return 0
-    return Math.floor((now - this.perfStart) / this._beatIntervalMs)
+    const elapsed = now - this.perfStart
+    const beatsSinceTransition = elapsed / this._beatIntervalMs
+    return Math.floor(this.accumulatedBeats + beatsSinceTransition)
   }
 
   /** Beat index nearest to a perf time (used for tap-to-note matching). */
   nearestBeatIndex(now = performance.now()): number {
     if (!this.started) return 0
-    return Math.round((now - this.perfStart) / this._beatIntervalMs)
+    const elapsed = now - this.perfStart
+    const beatsSinceTransition = elapsed / this._beatIntervalMs
+    return Math.round(this.accumulatedBeats + beatsSinceTransition)
   }
 
   /** Perf-time at which a given beat index occurs (performance.now domain). */
   perfTimeOfBeat(beatIndex: number): number {
-    return this.perfStart + beatIndex * this._beatIntervalMs
+    const beatsNeeded = beatIndex - this.accumulatedBeats
+    return this.perfStart + beatsNeeded * this._beatIntervalMs
   }
 
   /** Smallest beat index whose perf time is strictly in the future. */
   nextBeatAfterPerf(now = performance.now()): number {
     if (!this.started) return 0
-    return Math.max(0, Math.ceil((now - this.perfStart) / this._beatIntervalMs))
+    const elapsed = now - this.perfStart
+    const beatsSinceTransition = elapsed / this._beatIntervalMs
+    return Math.max(0, Math.ceil(this.accumulatedBeats + beatsSinceTransition))
   }
 
   /** Convert a beat index to its scheduled audio-context time (seconds). */
   audioTimeOfBeat(beatIndex: number): number {
-    return this.audioStart + beatIndex * this.beatIntervalSec
+    const beatsNeeded = beatIndex - this.accumulatedBeats
+    return this.audioStart + beatsNeeded * this.beatIntervalSec
   }
 
   /** Smallest beat index whose scheduled audio time is in the future. */
   nextBeatAfter(audioNow: number): number {
     if (!this.started) return 0
     const elapsedAudio = audioNow - this.audioStart
-    return Math.max(0, Math.ceil(elapsedAudio / this.beatIntervalSec))
+    const beatsSinceTransition = elapsedAudio / this.beatIntervalSec
+    return Math.max(0, Math.ceil(this.accumulatedBeats + beatsSinceTransition))
   }
 }
