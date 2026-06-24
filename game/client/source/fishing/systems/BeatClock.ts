@@ -63,6 +63,29 @@ export class BeatClock {
     this._beatIntervalMs = 60_000 / bpm
   }
 
+  /**
+   * Align the full rhythm grid to an audio-derived marker.
+   *
+   * `audioTimeOfBeatZero` is the AudioContext time at which beat index 0
+   * should occur, usually "pack source start + parsed first downbeat offset".
+   * This keeps visual timing and Web Audio scheduling on the same parsed grid
+   * instead of assuming the MP3 starts exactly on beat 1.
+   */
+  alignToAudioGrid(
+    bpm: number,
+    audioTimeOfBeatZero: number,
+    audioNow: number,
+    now = performance.now(),
+  ): void {
+    this.targetBpm = bpm
+    this.bpm = bpm
+    this._beatIntervalMs = 60_000 / bpm
+    this.perfStart = now
+    this.audioStart = audioNow
+    this.accumulatedBeats = (audioNow - audioTimeOfBeatZero) / this.beatIntervalSec
+    this.started = true
+  }
+
   get beatIntervalMs(): number {
     return this._beatIntervalMs
   }
@@ -81,7 +104,7 @@ export class BeatClock {
     const elapsed = now - this.perfStart
     const beatsSinceTransition = elapsed / this._beatIntervalMs
     const absoluteBeat = this.accumulatedBeats + beatsSinceTransition
-    return absoluteBeat % 1
+    return ((absoluteBeat % 1) + 1) % 1
   }
 
   /**

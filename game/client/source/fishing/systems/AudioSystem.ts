@@ -24,6 +24,28 @@ function basename(path: string): string {
   return idx >= 0 ? normalized.slice(idx + 1) : normalized
 }
 
+const PACK_V1_EXPECTED_BPM = 88
+const PACK_V1_BED = 'bed-verse-16bar.mp3'
+const PACK_V1_BUILD = 'build-prechorus-8bar.mp3'
+const PACK_V1_CHORUS = 'chorus-8bar.mp3'
+const PACK_V1_RISE = 'rise-fill-1bar.mp3'
+const PACK_V1_DROP = 'drop-fill-1bar.mp3'
+
+function normalizePackBpm(parsedBpm: number, expectedBpm: number): number {
+  if (!Number.isFinite(parsedBpm) || parsedBpm <= 0) return expectedBpm
+  const candidates = [parsedBpm / 4, parsedBpm / 2, parsedBpm, parsedBpm * 2, parsedBpm * 4]
+    .filter((bpm) => bpm >= 60 && bpm <= 150)
+  if (candidates.length === 0) return expectedBpm
+  const best = candidates.reduce((a, b) =>
+    Math.abs(a - expectedBpm) <= Math.abs(b - expectedBpm) ? a : b,
+  )
+  return Math.round(best * 100) / 100
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000
+}
+
 /**
  * Purely-synthesized audio (no bundled assets).
  *
@@ -128,6 +150,9 @@ export class AudioSystem {
   private packV1Loading = false
   private packV1Started = false
   private packV1StartTime = 0
+  private packV1Analysis: MusicAnalysis | null = null
+  private packV1Bpm = PACK_V1_EXPECTED_BPM
+  private packV1BeatZeroOffsetSec = 0
   private transitionPlayingForNextBar = false
 
   constructor() {
@@ -251,7 +276,7 @@ export class AudioSystem {
 
   getLockedBpm(): number | null {
     if (this.packV1Loaded) {
-      return 88
+      return this.packV1Bpm
     }
     return null
   }
@@ -278,12 +303,14 @@ export class AudioSystem {
         }
       })
       await Promise.all(promises)
-      
-      // If we loaded files successfully (all 5 stems must be decoded), mark packV1 as loaded and enforce BPM = 88
+
+      this.analyzePackV1Timing()
+
+      // If we loaded files successfully (all 5 stems must be decoded), mark packV1 as loaded and use the parsed beat grid.
       if (this.packV1Buffers.size === 5) {
         this.packV1Loaded = true
         if (this.beatClock) {
-          this.beatClock.setBpm(88)
+          this.beatClock.setBpm(this.packV1Bpm)
           this.resyncScheduler()
         }
         
@@ -297,6 +324,47 @@ export class AudioSystem {
     } finally {
       this.packV1Loading = false
     }
+  }
+
+  private analyzePackV1Timing(): void {
+    const bed = this.packV1Buffers.get(PACK_V1_BED)
+    if (!bed) return
+
+    try {
+      const analysis = MusicBeatParser.analyzeDecodedBuffer(bed)
+      const normalizedBpm = normalizePackBpm(analysis.bpm, PACK_V1_EXPECTED_BPM)
+      const beatOffset = analysis.beatTimes[0] ?? 0
+      const downbeatOffset = analysis.downbeatTimes[0] ?? beatOffset
+
+      this.packV1Analysis = analysis
+      this.packV1Bpm = normalizedBpm
+      this.packV1BeatZeroOffsetSec = downbeatOffset
+
+      console.info('[audio-pack-v1] parsed timing', {
+        bpm: analysis.bpm,
+        normalizedBpm,
+        firstBeatSec: round3(beatOffset),
+        firstDownbeatSec: round3(downbeatOffset),
+        confidence: round3(analysis.confidence),
+      })
+    } catch (err) {
+      console.warn('[audio-pack-v1] beat analysis failed; using authored 88 BPM grid', err)
+      this.packV1Analysis = null
+      this.packV1Bpm = PACK_V1_EXPECTED_BPM
+      this.packV1BeatZeroOffsetSec = 0
+    }
+  }
+
+  private alignClockToPackV1(startTime: number): void {
+    if (!this.ctx || !this.beatClock) return
+    const beatZeroAudioTime = startTime + this.packV1BeatZeroOffsetSec
+    this.beatClock.alignToAudioGrid(
+      this.packV1Bpm,
+      beatZeroAudioTime,
+      this.ctx.currentTime,
+      performance.now(),
+    )
+    this.nextScheduledBeat = this.beatClock.nextBeatAfter(this.ctx.currentTime)
   }
 
   private startPackV1Loop(time: number): void {
@@ -323,9 +391,9 @@ export class AudioSystem {
     this.packV1Gains.set('chorus', gainChorus)
     
     // Create and schedule loop sources
-    const bufferBed = this.packV1Buffers.get('bed-verse-16bar.mp3')
-    const bufferBuild = this.packV1Buffers.get('build-prechorus-8bar.mp3')
-    const bufferChorus = this.packV1Buffers.get('chorus-8bar.mp3')
+    const bufferBed = this.packV1Buffers.get(PACK_V1_BED)
+    const bufferBuild = this.packV1Buffers.get(PACK_V1_BUILD)
+    const bufferChorus = this.packV1Buffers.get(PACK_V1_CHORUS)
     
     if (bufferBed) {
       const src = this.ctx.createBufferSource()
@@ -355,6 +423,7 @@ export class AudioSystem {
     }
     
     this.packV1Started = true
+    this.alignClockToPackV1(time)
     this.updatePackV1Volume(this.currentSection, time, 0.05)
   }
 
@@ -936,7 +1005,7 @@ export class AudioSystem {
         if (this.packV1Loaded && this.packV1Started) {
           // Play a transition fill!
           const isRise = SECTION_RANK[this.pendingSection] > SECTION_RANK[this.currentSection]
-          const fillName = isRise ? 'rise-fill-1bar.mp3' : 'drop-fill-1bar.mp3'
+          const fillName = isRise ? PACK_V1_RISE : PACK_V1_DROP
           const fillBuffer = this.packV1Buffers.get(fillName)
           if (fillBuffer) {
             const fillSrc = this.ctx.createBufferSource()

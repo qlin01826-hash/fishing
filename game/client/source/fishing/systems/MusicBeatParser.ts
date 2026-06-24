@@ -64,6 +64,10 @@ export class MusicBeatParser {
       void ctx.close().catch(() => {})
     }
   }
+
+  static analyzeDecodedBuffer(buffer: AudioBuffer): MusicAnalysis {
+    return analyzeAudioBuffer(buffer)
+  }
 }
 
 function defaultAudioContextFactory(): AudioContext {
