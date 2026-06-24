@@ -1,4 +1,28 @@
 import type { BeatClock } from './BeatClock'
+import { MusicBeatParser, type MusicAnalysis } from './MusicBeatParser'
+
+/**
+ * Auto-discovered local AI music pack files.
+ *
+ * Notes:
+ * - Path is anchored to repository root: `audio-packs/pack-v1`.
+ * - We use `query: '?url'` so Vite returns resolved asset URLs.
+ * - If the folder is empty, this simply becomes `{}` (safe no-op).
+ */
+const PACK_V1_ASSET_URLS = import.meta.glob(
+  '../../../../../audio-packs/pack-v1/*.{mp3,MP3,wav,WAV,ogg,OGG,m4a,M4A,flac,FLAC}',
+  {
+    eager: true,
+    query: '?url',
+    import: 'default',
+  },
+) as Record<string, string>
+
+function basename(path: string): string {
+  const normalized = path.replaceAll('\\', '/')
+  const idx = normalized.lastIndexOf('/')
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized
+}
 
 /**
  * Purely-synthesized audio (no bundled assets).
@@ -93,6 +117,18 @@ export class AudioSystem {
 
   unlocked = false
   private muted = false
+  /** URL -> parsed beat-grid metadata cache. */
+  private readonly musicAnalysisCache = new Map<string, MusicAnalysis>()
+
+  // ---- AI Pack v1 Stems and Transition Buffers ----
+  private readonly packV1Buffers = new Map<string, AudioBuffer>()
+  private readonly packV1Sources = new Map<string, AudioBufferSourceNode>()
+  private readonly packV1Gains = new Map<string, GainNode>()
+  private packV1Loaded = false
+  private packV1Loading = false
+  private packV1Started = false
+  private packV1StartTime = 0
+  private transitionPlayingForNextBar = false
 
   /** Call from a user gesture (e.g. pointerdown). Safe to call repeatedly. */
   unlock(): void {
@@ -120,6 +156,7 @@ export class AudioSystem {
       this.unlocked = true
       this.startStorm()
       this.startStringPad()
+      this.loadPackV1()
       if (this.beatClock && !this.beatClock.started) {
         this.beatClock.start(this.ctx.currentTime)
       }
@@ -150,6 +187,226 @@ export class AudioSystem {
   }
 
   /**
+   * Analyze an external music file and extract a gameplay-ready beat grid
+   * (BPM, beat timestamps, downbeats, onset strengths).
+   *
+   * This is the parser entrypoint used for "single track first" alignment:
+   * feed it one generated song URL, then drive timing-sensitive gameplay
+   * from the returned metadata before investing in full multi-stem packing.
+   */
+  async analyzeMusicFromUrl(url: string): Promise<MusicAnalysis> {
+    const cached = this.musicAnalysisCache.get(url)
+    if (cached) return cached
+    const analysis = await MusicBeatParser.analyzeFromUrl(url)
+    this.musicAnalysisCache.set(url, analysis)
+    return analysis
+  }
+
+  /**
+   * Return all discovered track URLs from `audio-packs/pack-v1`.
+   * Key is file basename (e.g. `bed-verse-16bar.mp3`), value is resolved URL.
+   */
+  listPackV1Tracks(): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const [k, url] of Object.entries(PACK_V1_ASSET_URLS)) {
+      out[basename(k)] = url
+    }
+    return out
+  }
+
+  /**
+   * Parse every discovered track in `audio-packs/pack-v1` and return
+   * gameplay metadata per file. Useful for one-click validation after
+   * dropping a new AI-generated pack.
+   */
+  async analyzePackV1(): Promise<Record<string, MusicAnalysis>> {
+    const tracks = this.listPackV1Tracks()
+    const names = Object.keys(tracks)
+    const out: Record<string, MusicAnalysis> = {}
+    for (const name of names) {
+      const url = tracks[name]
+      if (!url) continue
+      out[name] = await this.analyzeMusicFromUrl(url)
+    }
+    return out
+  }
+
+  getLockedBpm(): number | null {
+    if (this.packV1Loaded) {
+      return 88
+    }
+    return null
+  }
+
+  private async loadPackV1(): Promise<void> {
+    if (this.packV1Loading || this.packV1Loaded) return
+    this.packV1Loading = true
+    try {
+      const tracks = this.listPackV1Tracks()
+      const promises = Object.entries(tracks).map(async ([name, url]) => {
+        if (!url) return
+        try {
+          const res = await window.fetch(url)
+          const arrayBuffer = await res.arrayBuffer()
+          if (this.ctx) {
+            const buffer = await this.ctx.decodeAudioData(arrayBuffer)
+            this.packV1Buffers.set(name, buffer)
+          }
+        } catch (err) {
+          console.error(`Failed to load pack-v1 track: ${name}`, err)
+        }
+      })
+      await Promise.all(promises)
+      
+      // If we loaded files successfully, mark packV1 as loaded and enforce BPM = 88
+      if (this.packV1Buffers.size > 0) {
+        this.packV1Loaded = true
+        if (this.beatClock) {
+          this.beatClock.setBpm(88)
+          this.resyncScheduler()
+        }
+        
+        // If beats are already active (using synthesized fallback), seamlessly transition
+        if (this.drumsActive) {
+          this.transitionToPackV1()
+        }
+      }
+    } catch (err) {
+      console.error("Error loading pack-v1", err)
+    } finally {
+      this.packV1Loading = false
+    }
+  }
+
+  private startPackV1Loop(time: number): void {
+    if (!this.ctx || !this.packV1Loaded || !this.master) return
+    if (this.packV1Started) return
+    
+    this.packV1StartTime = time
+    
+    // Create/get GainNodes
+    const gainBed = this.packV1Gains.get('bed') ?? this.ctx.createGain()
+    const gainBuild = this.packV1Gains.get('build') ?? this.ctx.createGain()
+    const gainChorus = this.packV1Gains.get('chorus') ?? this.ctx.createGain()
+    
+    gainBed.gain.setValueAtTime(0, time)
+    gainBuild.gain.setValueAtTime(0, time)
+    gainChorus.gain.setValueAtTime(0, time)
+    
+    gainBed.connect(this.master)
+    gainBuild.connect(this.master)
+    gainChorus.connect(this.master)
+    
+    this.packV1Gains.set('bed', gainBed)
+    this.packV1Gains.set('build', gainBuild)
+    this.packV1Gains.set('chorus', gainChorus)
+    
+    // Create and schedule loop sources
+    const bufferBed = this.packV1Buffers.get('bed-verse-16bar.mp3')
+    const bufferBuild = this.packV1Buffers.get('build-prechorus-8bar.mp3')
+    const bufferChorus = this.packV1Buffers.get('chorus-8bar.mp3')
+    
+    if (bufferBed) {
+      const src = this.ctx.createBufferSource()
+      src.buffer = bufferBed
+      src.loop = true
+      src.connect(gainBed)
+      src.start(time)
+      this.packV1Sources.set('bed', src)
+    }
+    
+    if (bufferBuild) {
+      const src = this.ctx.createBufferSource()
+      src.buffer = bufferBuild
+      src.loop = true
+      src.connect(gainBuild)
+      src.start(time)
+      this.packV1Sources.set('build', src)
+    }
+    
+    if (bufferChorus) {
+      const src = this.ctx.createBufferSource()
+      src.buffer = bufferChorus
+      src.loop = true
+      src.connect(gainChorus)
+      src.start(time)
+      this.packV1Sources.set('chorus', src)
+    }
+    
+    this.packV1Started = true
+    this.updatePackV1Volume(this.currentSection, time, 0.05)
+  }
+
+  private updatePackV1Volume(section: Section, atTime: number, transitionTime = 0.5): void {
+    if (!this.ctx) return
+    const gBed = this.packV1Gains.get('bed')
+    const gBuild = this.packV1Gains.get('build')
+    const gChorus = this.packV1Gains.get('chorus')
+    
+    let volBed = 0
+    let volBuild = 0
+    let volChorus = 0
+    
+    switch (section) {
+      case 'intro':
+        volBed = 0.35
+        volBuild = 0
+        volChorus = 0
+        break
+      case 'verse':
+        volBed = 0.75
+        volBuild = 0
+        volChorus = 0
+        break
+      case 'preChorus':
+        volBed = 0.75
+        volBuild = 0.75
+        volChorus = 0
+        break
+      case 'chorus':
+        volBed = 0.75
+        volBuild = 0.75
+        volChorus = 0.75
+        break
+      case 'bridge':
+        volBed = 0.45
+        volBuild = 0
+        volChorus = 0
+        break
+    }
+    
+    if (gBed) gBed.gain.setTargetAtTime(volBed, atTime, transitionTime)
+    if (gBuild) gBuild.gain.setTargetAtTime(volBuild, atTime, transitionTime)
+    if (gChorus) gChorus.gain.setTargetAtTime(volChorus, atTime, transitionTime)
+  }
+
+  private transitionToPackV1(): void {
+    if (!this.ctx || !this.beatClock || !this.packV1Loaded || this.packV1Started) return
+    
+    const now = this.ctx.currentTime
+    const nextBeatIdx = this.beatClock.nextBeatAfter(now)
+    const startTime = this.beatClock.audioTimeOfBeat(nextBeatIdx)
+    
+    this.startPackV1Loop(startTime)
+    
+    // Fade out synthetic gain nodes
+    for (const g of [
+      this.drumGain,
+      this.brassGain,
+      this.tubaGain,
+      this.fluteGain,
+      this.bassGain,
+      this.padGain,
+      this.arpGain,
+      this.choirGain,
+      this.bellGain,
+      this.leadGain,
+    ]) {
+      if (g) g.gain.setTargetAtTime(0, startTime, 0.25)
+    }
+  }
+
+  /**
    * Begin the battle song.
    *
    * @param initialIntensity 0..1 weather pressure — used as a fallback
@@ -176,6 +433,11 @@ export class AudioSystem {
     this.consecutiveChorusBumps = 0
     this.motifIndex = 0
     this.applySectionGains(this.currentSection, 0.45)
+    
+    if (this.packV1Loaded) {
+      this.startPackV1Loop(this.ctx.currentTime + 0.05)
+    }
+    
     this.schedulerHandle = window.setInterval(() => this.tickDrumScheduler(), 25)
   }
 
@@ -188,12 +450,31 @@ export class AudioSystem {
     this.sectionFloor = 'verse'
     this.keyOffsetSemis = 0
     this.consecutiveChorusBumps = 0
+    this.transitionPlayingForNextBar = false
     if (this.schedulerHandle !== null) {
       window.clearInterval(this.schedulerHandle)
       this.schedulerHandle = null
     }
     if (!this.ctx) return
     const now = this.ctx.currentTime
+    
+    // Stop pack-v1 audio loops if active
+    if (this.packV1Started) {
+      for (const src of this.packV1Sources.values()) {
+        try {
+          src.stop(now + 0.25)
+        } catch {}
+      }
+      this.packV1Sources.clear()
+      
+      // Fade out pack-v1 gains
+      for (const gainNode of this.packV1Gains.values()) {
+        gainNode.gain.setTargetAtTime(0, now, 0.1)
+      }
+      
+      this.packV1Started = false
+    }
+
     for (const g of [
       this.drumGain,
       this.brassGain,
@@ -352,6 +633,28 @@ export class AudioSystem {
 
   playLureCall(step = 0): void {
     this.shortPing(this.lureScale[step % this.lureScale.length], 0.18, 'triangle', 0.3)
+  }
+
+  /**
+   * Sample-accurate lure call note locked to a specific beat index.
+   * WaitingState uses this to pre-schedule the whole "call" bar so what
+   * the player hears is phase-aligned with the running groove bed.
+   */
+  playLureCallOnBeat(beatIndex: number, step = 0): void {
+    if (!this.ctx || !this.master || !this.beatClock || !this.beatClock.started) {
+      this.playLureCall(step)
+      return
+    }
+    const target = this.beatClock.audioTimeOfBeat(beatIndex)
+    // Guard against scheduling in the past if the frame arrives late.
+    const at = Math.max(this.ctx.currentTime + 0.005, target)
+    this.shortPingAt(
+      this.lureScale[step % this.lureScale.length],
+      0.18,
+      'triangle',
+      0.3,
+      at,
+    )
   }
 
   playLureEcho(step = 0, good = true): void {
@@ -609,11 +912,35 @@ export class AudioSystem {
     // section starts cleanly on beat 0 of its first bar.
     if (beatInBar === 0) {
       if (this.pendingSection && this.pendingSection !== this.currentSection) {
+        if (this.packV1Loaded && this.packV1Started) {
+          // Play a transition fill!
+          const isRise = SECTION_RANK[this.pendingSection] > SECTION_RANK[this.currentSection]
+          const fillName = isRise ? 'rise-fill-1bar.mp3' : 'drop-fill-1bar.mp3'
+          const fillBuffer = this.packV1Buffers.get(fillName)
+          if (fillBuffer) {
+            const fillSrc = this.ctx.createBufferSource()
+            fillSrc.buffer = fillBuffer
+            fillSrc.connect(this.master!)
+            fillSrc.start(beatTime)
+          }
+          // Dip volumes slightly for the transition bar
+          this.updatePackV1Volume(this.currentSection, beatTime, 0.2)
+          this.transitionPlayingForNextBar = true
+        } else {
+          this.currentSection = this.pendingSection
+          this.pendingSection = null
+          this.sectionBeatsElapsed = 0
+          this.applySectionGains(this.currentSection, 0.35)
+        }
+      } else if (this.transitionPlayingForNextBar && this.pendingSection) {
         this.currentSection = this.pendingSection
         this.pendingSection = null
         this.sectionBeatsElapsed = 0
+        this.transitionPlayingForNextBar = false
         this.applySectionGains(this.currentSection, 0.35)
+        this.updatePackV1Volume(this.currentSection, beatTime, 0.35)
       }
+      
       // Intro auto-resolves to verse after its allotted bars — applied
       // on the SAME bar boundary instead of queued for the next one,
       // otherwise the player hears an extra empty bar of intro.
@@ -622,9 +949,16 @@ export class AudioSystem {
         this.currentSection = 'verse'
         this.sectionBeatsElapsed = 0
         this.applySectionGains(this.currentSection, 0.55)
+        this.updatePackV1Volume(this.currentSection, beatTime, 0.55)
       }
     }
+    
     this.sectionBeatsElapsed += 1
+
+    // If high-quality stems are playing, we skip all synthetic sound generation!
+    if (this.packV1Loaded && this.packV1Started) {
+      return
+    }
 
     const profile = SECTION_PROFILES[this.currentSection]
     const drumOut = this.drumGain
@@ -1294,6 +1628,27 @@ export class AudioSystem {
     osc.connect(gain).connect(this.master)
     osc.start(t0)
     osc.stop(t0 + dur)
+  }
+
+  private shortPingAt(
+    freq: number,
+    dur: number,
+    type: OscillatorType,
+    vol: number,
+    at: number,
+  ): void {
+    if (!this.ctx || !this.master) return
+    const ctx = this.ctx
+    const osc = ctx.createOscillator()
+    osc.type = type
+    osc.frequency.setValueAtTime(freq, at)
+    osc.frequency.exponentialRampToValueAtTime(freq * 0.7, at + dur)
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(vol, at)
+    gain.gain.exponentialRampToValueAtTime(0.001, at + dur)
+    osc.connect(gain).connect(this.master)
+    osc.start(at)
+    osc.stop(at + dur)
   }
 
   private brassNote(

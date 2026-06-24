@@ -1,0 +1,13 @@
+{
+  "name": "AI Fishing Groove Pack v1",
+  "bpm": 88,
+  "key": "C minor",
+  "timeSignature": "4/4",
+  "stems": {
+    "bed": "bed-verse-16bar.mp3",
+    "build": "build-prechorus-8bar.mp3",
+    "chorus": "chorus-8bar.mp3",
+    "rise": "rise-fill-1bar.mp3",
+    "drop": "drop-fill-1bar.mp3"
+  }
+}

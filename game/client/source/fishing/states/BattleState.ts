@@ -201,7 +201,8 @@ export class BattleState implements IFishingState {
     // Tempo baseline now comes from the STAGE; weather only nudges it a
     // few BPM either side so the song speed reads as "how deep am I"
     // rather than "how hungry is the penguin".
-    const bpm = Math.round(stage.bpmBase + (intensity - 0.5) * 12)
+    const lockedBpm = this.ctx.audio.getLockedBpm()
+    const bpm = lockedBpm ?? Math.round(stage.bpmBase + (intensity - 0.5) * 12)
     this.ctx.beatClock.setBpm(bpm)
     // Music complexity is driven by the depth STAGE now: deeper water
     // opens the fight in a richer section so the arrangement escalates

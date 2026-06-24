@@ -27,12 +27,8 @@ import { SailingState } from './SailingState'
  * line never gets stuck waiting for a clock that never started.
  */
 
-/** One 4-beat bar. `true` = a hit the player must echo. */
-const LURE_PATTERNS: ReadonlyArray<ReadonlyArray<boolean>> = [
-  [true, false, true, false], // beats 1 & 3 — gentle half-note call
-  [true, true, false, true], // 1, 2, & 4 — a little syncopation
-  [true, false, true, true], // 1, 3, & 4 — push to the bar end
-]
+/** One 4-beat bar. `true` = a hit the player should echo. */
+const LURE_PATTERN: ReadonlyArray<boolean> = [true, false, true, false]
 
 /** ms either side of a beat that still counts as an on-beat echo. */
 const ECHO_WINDOW_MS = 170
@@ -48,14 +44,12 @@ export class WaitingState implements IFishingState {
 
   // ---- Call-and-response lure ----
   private lureActive = false
-  private patternIndex = 0
-  private pattern: ReadonlyArray<boolean> = LURE_PATTERNS[0]
-  /** Beat index where the current round's CALL bar begins. */
+  private pattern: ReadonlyArray<boolean> = LURE_PATTERN
+  /** Beat index where the single call/response round begins. */
   private roundStartBeat = 0
-  /** Highest beat we've already emitted a call note for. */
-  private lastCallBeat = -1
   private phase: 'call' | 'listen' = 'call'
   private echoes: Array<'none' | 'good' | 'miss'> = ['none', 'none', 'none', 'none']
+  private roundCompleted = false
 
   constructor(ctx: FishingContext) {
     this.ctx = ctx
@@ -87,7 +81,7 @@ export class WaitingState implements IFishingState {
   update(dtSeconds: number, _elapsedMs: number): void {
     this.timeWaited += dtSeconds
 
-    if (this.lureActive && this.ctx.beatClock.started) {
+    if (this.lureActive && this.ctx.beatClock.started && !this.roundCompleted) {
       this.updateLure()
     } else {
       // Fallback: original passive interest model.
@@ -99,8 +93,7 @@ export class WaitingState implements IFishingState {
       return
     }
 
-    // A slow passive trickle so a totally silent player still eventually
-    // gets a bite, but active echoing is far faster.
+    // A slow passive trickle while the single round is running.
     this.biteCharge = Math.min(1, this.biteCharge + dtSeconds * 0.02)
     if (this.biteCharge >= 1 && this.timeWaited > 1) {
       this.commitBite()
@@ -113,16 +106,20 @@ export class WaitingState implements IFishingState {
     this.ctx.eventOverlay.hide()
   }
 
-  // ---- Lure round lifecycle ----
+  // ---- Single lure round lifecycle ----
 
   private startRound(): void {
-    this.pattern = LURE_PATTERNS[this.patternIndex % LURE_PATTERNS.length]
-    this.patternIndex += 1
     // One-beat lead-in so the first call note never fires mid-beat.
     this.roundStartBeat = this.ctx.beatClock.nextBeatAfterPerf(performance.now()) + 1
-    this.lastCallBeat = this.roundStartBeat - 1
     this.phase = 'call'
     this.echoes = ['none', 'none', 'none', 'none']
+    this.roundCompleted = false
+    // Pre-schedule the whole CALL phrase against the audio clock so it
+    // stays phase-locked with the groove bed.
+    for (let i = 0; i < this.pattern.length; i += 1) {
+      if (!this.pattern[i]) continue
+      this.ctx.audio.playLureCallOnBeat(this.roundStartBeat + i, i)
+    }
     this.pushOverlay(-1)
   }
 
@@ -132,22 +129,16 @@ export class WaitingState implements IFishingState {
     const callEnd = this.roundStartBeat + 4 // first listen beat
     const roundEnd = this.roundStartBeat + 8
 
-    // Round finished — score it and start the next call.
+    // One round only — score once and move on.
     if (beat >= roundEnd) {
       this.finishRound()
       return
     }
 
     if (beat < callEnd) {
-      // CALL phase: emit each hit's note once as we cross its beat.
+      // CALL phase is already pre-scheduled in audio time; here we only
+      // update the visual cursor.
       this.phase = 'call'
-      while (this.lastCallBeat < beat && this.lastCallBeat + 1 < callEnd) {
-        this.lastCallBeat += 1
-        const idx = this.lastCallBeat - this.roundStartBeat
-        if (idx >= 0 && idx < 4 && this.pattern[idx]) {
-          this.ctx.audio.playLureCall(idx)
-        }
-      }
       const activeIdx = beat - this.roundStartBeat
       this.pushOverlay(activeIdx >= 0 && activeIdx < 4 ? activeIdx : -1)
     } else {
@@ -159,18 +150,17 @@ export class WaitingState implements IFishingState {
   }
 
   private finishRound(): void {
+    if (this.roundCompleted) return
+    this.roundCompleted = true
     const hits = this.pattern.filter(Boolean).length
     const good = this.echoes.filter((e) => e === 'good').length
-    // A clean bar (every hit echoed on-beat) is a big reward and, if the
-    // player has been consistent, lands the fish.
-    if (hits > 0 && good >= hits) {
+    // One pass only: once the player finishes this single phrase, we move
+    // on to hook resolution. Better accuracy gives a nicer payoff.
+    const passed = hits > 0 && good >= Math.ceil(hits * 0.67)
+    if (passed) {
       this.biteCharge = Math.min(1, this.biteCharge + 0.34)
     }
-    if (this.biteCharge >= 1 && this.timeWaited > 1) {
-      this.commitBite()
-      return
-    }
-    this.startRound()
+    this.commitBite(passed)
   }
 
   private pushOverlay(activeBeat: number): void {
@@ -224,9 +214,9 @@ export class WaitingState implements IFishingState {
     this.ctx.goTo(new SailingState(this.ctx))
   }
 
-  private commitBite(): void {
+  private commitBite(withLureSuccessSfx = false): void {
     const { fishSchool, hook, viewport, weatherSystem, progression } = this.ctx
-    if (this.lureActive) this.ctx.audio.playLureSuccess()
+    if (withLureSuccessSfx) this.ctx.audio.playLureSuccess()
     const depth01 = (hook.y - viewport.waterLineY) / Math.max(1, viewport.maxDepth)
     const nearby = fishSchool.pickNearestFish(hook.x, hook.y, 240)
     const stageIndex = progression.index
