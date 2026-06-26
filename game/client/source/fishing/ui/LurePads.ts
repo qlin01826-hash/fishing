@@ -7,8 +7,12 @@ export type LureDirection = 'left' | 'right'
 
 interface PadPointer {
   pointerId: number
+  side: 'left' | 'right'
   startX: number
-  dir: LureDirection | null
+  startY: number
+  startMs: number
+  lastX: number
+  lastY: number
 }
 
 interface PadSide {
@@ -44,7 +48,11 @@ export class LurePads {
   private padPhase: 'idle' | 'preview' | 'hit' = 'idle'
   private listenActive = false
   private readonly pointers = new Map<number, PadPointer>()
-  private readonly swipeThreshold = 28
+  private readonly swipeMinDistance = 26
+  private readonly swipeMaxDistance = 180
+  private readonly swipeMinDurationMs = 25
+  private readonly swipeMaxDurationMs = 280
+  private readonly swipeHorizontalRatio = 1.25
   private readonly keysDown = new Set<string>()
   private keyboardLatched = false
   private beatClock: BeatClock | null = null
@@ -69,7 +77,12 @@ export class LurePads {
 
   setLayout(width: number, height: number): void {
     const minDim = Math.min(width, height)
-    const radius = Math.max(48, Math.min(78, minDim * 0.11))
+    // Keep the two pads clearly separated on narrow phones to avoid
+    // "end overlap" visual confusion and accidental wrong-side touches.
+    const desiredRadius = Math.max(44, Math.min(78, minDim * 0.11))
+    const minGap = 24
+    const maxRadiusFromWidth = Math.max(36, (width - minGap - 36) / 4)
+    const radius = Math.min(desiredRadius, maxRadiusFromWidth)
     const margin = radius + 18
     const cy = height - radius - 20
     this.layoutPad(this.left, margin, cy, radius)
@@ -256,11 +269,16 @@ export class LurePads {
     e.stopPropagation()
     const pad = side === 'left' ? this.left : this.right
     pad.active = true
+    pad.swipeDir = null
     const local = pad.container.toLocal(e.global)
     this.pointers.set(e.pointerId, {
       pointerId: e.pointerId,
+      side,
       startX: local.x,
-      dir: null,
+      startY: local.y,
+      startMs: performance.now(),
+      lastX: local.x,
+      lastY: local.y,
     })
   }
 
@@ -268,21 +286,49 @@ export class LurePads {
     if (!this.listenActive) return
     const rec = this.pointers.get(e.pointerId)
     if (!rec) return
+    if (rec.side !== side) return
     const pad = side === 'left' ? this.left : this.right
     const local = pad.container.toLocal(e.global)
-    const dx = local.x - rec.startX
-    if (Math.abs(dx) >= this.swipeThreshold) {
-      rec.dir = dx < 0 ? 'left' : 'right'
-      pad.swipeDir = rec.dir
-    }
-    this.tryResolveTouch()
+    rec.lastX = local.x
+    rec.lastY = local.y
   }
 
   private onPadUp(e: FederatedPointerEvent, side: 'left' | 'right'): void {
     const pad = side === 'left' ? this.left : this.right
-    pad.active = false
+    const rec = this.pointers.get(e.pointerId)
     this.pointers.delete(e.pointerId)
-    this.tryResolveTouch()
+    pad.active = false
+    if (!this.listenActive || !rec || rec.side !== side) return
+
+    const local = pad.container.toLocal(e.global)
+    const dir = this.resolveShortSwipe(rec, local.x, local.y, performance.now())
+    if (dir) {
+      pad.swipeDir = dir
+      this.tryResolveTouch()
+    }
+  }
+
+  private resolveShortSwipe(
+    rec: PadPointer,
+    endX: number,
+    endY: number,
+    endMs: number,
+  ): LureDirection | null {
+    const dx = endX - rec.startX
+    const dy = endY - rec.startY
+    const absDx = Math.abs(dx)
+    const absDy = Math.abs(dy)
+    const duration = endMs - rec.startMs
+
+    // Enforce a short, clearly horizontal swipe gesture:
+    // - taps fail (too short)
+    // - long drags fail (too slow / too far)
+    // - diagonal strokes fail (not horizontal enough)
+    if (duration < this.swipeMinDurationMs || duration > this.swipeMaxDurationMs) return null
+    if (absDx < this.swipeMinDistance || absDx > this.swipeMaxDistance) return null
+    if (absDx < absDy * this.swipeHorizontalRatio) return null
+
+    return dx < 0 ? 'left' : 'right'
   }
 
   private tryResolveTouch(): void {
