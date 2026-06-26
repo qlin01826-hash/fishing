@@ -10,7 +10,7 @@ import type { FishDef } from './types'
  * then subscribe to it in `FishingScene` rather than reaching into the
  * state that produced it.
  */
-export interface FishingEvents {
+export type FishingEvents = {
   /**
    * A fish was successfully landed. Fired once by `CatchState`. Systems
    * that care (difficulty ladder, music richness, future achievements /

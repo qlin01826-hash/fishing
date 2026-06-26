@@ -19,6 +19,10 @@ interface RhythmNote {
   head: Graphics
   tail?: Graphics
   curveType?: 'straight' | 'dive' | 'wave' | 'helix'
+  startX?: number
+  startY?: number
+  endX?: number
+  endY?: number
 }
 
 interface Particle {
@@ -82,7 +86,7 @@ export class RhythmTrack {
 
   // Big, screen-filling perspective constants.
   private readonly Z_HORIZON = 1400
-  private readonly Z_HIT = 130
+  public readonly Z_HIT = 130
   private readonly FOCAL_LENGTH = 260
   private readonly LANE_SPREAD = 230
   private readonly GROUND_Y = 240

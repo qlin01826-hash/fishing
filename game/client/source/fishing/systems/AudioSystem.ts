@@ -19,7 +19,7 @@ const PACK_V1_ASSET_URLS = import.meta.glob(
 ) as Record<string, string>
 
 function basename(path: string): string {
-  const normalized = path.replaceAll('\\', '/')
+  const normalized = path.replace(/\\/g, '/')
   const idx = normalized.lastIndexOf('/')
   return idx >= 0 ? normalized.slice(idx + 1) : normalized
 }
