@@ -27,6 +27,7 @@ export class ForegroundProps {
   private viewport: ViewportContext
   private nightPhase = 0
   private moonAltitude = 0
+  private worldScroll = 0
 
   /** Wall-clock seconds — used for buoy bob phase + buoy beacon blink. */
   private elapsed = 0
@@ -56,7 +57,11 @@ export class ForegroundProps {
     this.beatPulse = pulse
   }
 
-  update(dtSeconds: number, weather: WeatherSnapshot): void {
+  setWorldScroll(px: number): void {
+    this.worldScroll = Math.max(0, px)
+  }
+
+  update(dtSeconds: number, weather: WeatherSnapshot, sailMul = 1): void {
     this.elapsed += dtSeconds
 
     // Spawn cadence: average ~9 s between props with a wind-driven
@@ -68,10 +73,8 @@ export class ForegroundProps {
       this.spawnRandom()
     }
 
-    // World scroll speed mirrors HorizonLayer.nearRidge but slightly
-    // faster (~1.35×) so these read as closer to the camera.
-    const baseSpeed = 12 + weather.windPush * 0.05
-    const scrollSpeed = baseSpeed * 1.4
+    const baseSpeed = (38 + weather.windPush * 0.14) * sailMul
+    const scrollSpeed = baseSpeed * 1.35 + this.worldScroll * 0.002
 
     for (const p of this.props) {
       p.x -= scrollSpeed * p.speedMul * dtSeconds

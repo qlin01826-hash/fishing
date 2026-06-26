@@ -897,6 +897,26 @@ export class AudioSystem {
     this.shortPing(1320, 0.1, 'triangle', 0.22)
   }
 
+  /**
+   * Ground-lane note hit — a punchy low-mid "thock" so the floor track
+   * reads as the rhythmic backbone. Perfect adds a bright top layer.
+   */
+  playGroundHit(perfect: boolean): void {
+    if (!this.ctx || !this.master) return
+    this.synthKick(this.ctx.currentTime, perfect ? 0.4 : 0.28)
+    this.shortPing(perfect ? 392 : 330, 0.08, 'square', perfect ? 0.2 : 0.14)
+  }
+
+  /**
+   * Air/arc note hit — an airy high "shimmer" layered an octave up so
+   * the sky line is audibly distinct from the ground backbone.
+   */
+  playAirHit(perfect: boolean): void {
+    if (!this.ctx || !this.master) return
+    this.shortPing(perfect ? 1760 : 1318, 0.12, 'triangle', perfect ? 0.2 : 0.14)
+    this.shortPing(perfect ? 2637 : 1976, 0.1, 'sine', perfect ? 0.14 : 0.09)
+  }
+
   destroy(): void {
     this.stopBeats()
     try {

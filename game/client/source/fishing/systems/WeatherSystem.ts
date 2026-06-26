@@ -1,23 +1,17 @@
 import type { WeatherSnapshot, WindTier } from '../types'
 
 /**
- * Converts hunger (0..1) into a weather snapshot that other systems read.
+ * Weather is driven primarily by how deep the voyage has sailed (zone +
+ * voyage progress). Penguin hunger adds a smaller boost on top.
  *
- * The breakpoints follow the spec:
- *   < 30%  : calm, normal fish
- *   30-60% : breeze, parabola starts to drift
- *   60-85% : strong wind, rare boost up
- *   > 85%  : storm, double rewards
- *
- * `intensity` is a smooth 0..1 mapping (good for visual interpolation —
- * wave amplitude, audio gain, etc.); `tier` is a discrete bucket for UI
- * labels and reward math.
+ * Shallows: calm → breeze at most (unless starving).
+ * Deep / abyss: strong wind and storms become the baseline.
  */
 export class WeatherSystem {
-  private snapshot: WeatherSnapshot = makeSnapshot(0)
+  private snapshot: WeatherSnapshot = makeSnapshot(0, 0, 0)
 
-  update(hunger: number): void {
-    this.snapshot = makeSnapshot(hunger)
+  update(hunger: number, voyageT: number, zone: number): void {
+    this.snapshot = makeSnapshot(hunger, voyageT, zone)
   }
 
   get(): WeatherSnapshot {
@@ -25,27 +19,35 @@ export class WeatherSystem {
   }
 }
 
-function makeSnapshot(hunger: number): WeatherSnapshot {
-  const tier = bucket(hunger)
-  const intensity = curve(hunger)
+function makeSnapshot(hunger: number, voyageT: number, zone: number): WeatherSnapshot {
+  const v = Math.max(0, Math.min(1, voyageT))
+  const z = Math.max(0, Math.min(4, zone)) / 4
+  const zoneBase = z * 0.5 + v * 0.42
+  const hungerBoost = hungerCurve(hunger) * 0.28
+  const intensity = clamp01(zoneBase + hungerBoost)
+  const tier = bucketFromIntensity(intensity)
   return {
     tier,
     intensity,
-    windPush: 90 * intensity,
-    rewardMultiplier: tier === 'storm' ? 2 : tier === 'strong' ? 1.4 : tier === 'breeze' ? 1.1 : 1,
+    windPush: 35 + intensity * 110,
+    rewardMultiplier:
+      tier === 'storm' ? 2 : tier === 'strong' ? 1.4 : tier === 'breeze' ? 1.1 : 1,
     rareBoost: intensity,
   }
 }
 
-function bucket(hunger: number): WindTier {
-  if (hunger < 0.3) return 'calm'
-  if (hunger < 0.6) return 'breeze'
-  if (hunger < 0.85) return 'strong'
+function bucketFromIntensity(intensity: number): WindTier {
+  if (intensity < 0.22) return 'calm'
+  if (intensity < 0.48) return 'breeze'
+  if (intensity < 0.74) return 'strong'
   return 'storm'
 }
 
-function curve(hunger: number): number {
-  // Smooth-step that under-weights the calm zone and ramps up past 0.6
+function hungerCurve(hunger: number): number {
   const clamped = Math.max(0, Math.min(1, hunger))
   return clamped * clamped * (3 - 2 * clamped)
+}
+
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v))
 }

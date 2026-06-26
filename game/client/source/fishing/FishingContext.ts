@@ -1,4 +1,4 @@
-import type { Application } from 'pixi.js'
+import type { Application, Container } from 'pixi.js'
 import type { IFishingState } from './StateMachine'
 import type { ViewportContext, FishDef } from './types'
 import type { Boat } from './entities/Boat'
@@ -14,6 +14,7 @@ import type { ReelButtons } from './ui/ReelButtons'
 import type { TensionBar } from './ui/TensionBar'
 import type { WillpowerBar } from './ui/WillpowerBar'
 import type { PullPanel } from './ui/PullPanel'
+import type { LurePads } from './ui/LurePads'
 import type { EventOverlay } from './ui/EventOverlay'
 import type { CatchBanner } from './ui/CatchBanner'
 import type { NoteLane } from './ui/NoteLane'
@@ -35,6 +36,8 @@ import type { FishingEventBus } from './events'
 export interface FishingContext {
   readonly app: Application
   readonly viewport: ViewportContext
+  /** Underwater render layer — used by the 3D rhythm track to mount itself. */
+  readonly underWaterContainer: Container
   // Entities
   readonly boat: Boat
   readonly ocean: Ocean
@@ -50,6 +53,7 @@ export interface FishingContext {
   readonly tensionBar: TensionBar
   readonly willpowerBar: WillpowerBar
   readonly pullPanel: PullPanel
+  readonly lurePads: LurePads
   readonly eventOverlay: EventOverlay
   readonly catchBanner: CatchBanner
   readonly noteLane: NoteLane
@@ -86,6 +90,10 @@ export interface FishingContext {
   commissionFish: FishDef | null
   /** The fish currently being fought (null when idle). */
   activeBiter: { def: FishDef; sourceFishId?: number } | null
+
+  /** Camera scrolling for underwater rhythm game */
+  cameraY: number
+  cameraYTarget: number
 
   /** Trigger a state transition. */
   goTo(state: IFishingState, payload?: unknown): void

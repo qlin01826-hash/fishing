@@ -155,6 +155,38 @@ export class Penguin {
   /** Horizontal facing while swimming; flips with direction of orbit motion. */
   private swimFacing: 1 | -1 = 1
 
+  /** Overboard failure sequence after too many mistimed wave breaks. */
+  private overboardT = 0
+  private overboardDuration = 0
+  private overboardOnDone: (() => void) | null = null
+  /** Hull stuck in a wave — penguin partially submerged beside the boat. */
+  private waveSubmerge = 0
+  private waveSubmergeTarget = 0
+  private drownBubbleAccum = 0
+  /** Whistle-command lure: flag + directional cue. */
+  private commanderActive = false
+  private commanderDir: 'left' | 'right' = 'left'
+  private commanderPhase = 0
+  private whistleTimer = 0
+
+  // --- Underwater 3D Rhythm Game state ---
+  private isBackView = false
+  private underwaterState: 'neutral' | 'glide' | 'glide_dual' | 'dash' | 'eat' = 'neutral'
+
+  setBackView(back: boolean): void {
+    if (this.isBackView !== back) {
+      this.isBackView = back
+      this.drawPenguin()
+    }
+  }
+
+  setUnderwaterState(state: 'neutral' | 'glide' | 'glide_dual' | 'dash' | 'eat'): void {
+    if (this.underwaterState !== state) {
+      this.underwaterState = state
+      this.drawPenguin()
+    }
+  }
+
   constructor() {
     // Z order:
     //   bubbleGraphics (air bubbles, BEHIND body so they trail from behind)
@@ -254,6 +286,42 @@ export class Penguin {
     return this.swimT > 0.01
   }
 
+  /** False while the overboard failure cutscene owns the penguin's position. */
+  isAnchoredToBoat(): boolean {
+    return this.overboardT <= 0 && this.swimT < 0.001
+  }
+
+  /** 0 = dry on deck, 1 = drowning in a mistimed wave. */
+  setWaveSubmerge(amount: number): void {
+    this.waveSubmergeTarget = Math.max(0, Math.min(1, amount))
+  }
+
+  /** Penguin waves a flag and blows the whistle to direct lure swipes. */
+  setCommanderMode(active: boolean, direction: 'left' | 'right' = 'left'): void {
+    const wasActive = this.commanderActive
+    const dirChanged = wasActive && this.commanderDir !== direction
+    this.commanderActive = active
+    this.commanderDir = direction
+    if (active) {
+      this.setMood('request')
+      if (!wasActive || dirChanged) this.whistleTimer = 0.35
+    }
+  }
+
+  /**
+   * Fall off the deck, swim away, then invoke `onDone`. Used when the
+   * boat's course error maxes out from mistimed wave-breaking.
+   */
+  triggerOverboardFailure(onDone: () => void): void {
+    this.overboardT = 0
+    this.overboardDuration = 3.2
+    this.overboardOnDone = onDone
+    this.wantSwim = false
+    this.setMood('worried')
+    this.bubble.visible = false
+    this.bubbleTimer = 0
+  }
+
   setMood(mood: PenguinMood): void {
     if (this.mood !== mood) {
       const becomingSurprised = mood === 'surprised' && this.mood !== 'surprised'
@@ -329,10 +397,22 @@ export class Penguin {
    *                  visibly dances to the soundtrack.
    */
   update(dtSeconds: number, hunger: number, beatPulse = 0): void {
+    if (this.overboardT < this.overboardDuration) {
+      this.tickOverboard(dtSeconds)
+      return
+    }
+
     this.wobblePhase += dtSeconds * (1.5 + hunger * 2)
-    const sway = Math.sin(this.wobblePhase) * (1 + hunger * 2)
+    this.waveSubmerge +=
+      (this.waveSubmergeTarget - this.waveSubmerge) * Math.min(1, dtSeconds * 8)
+    if (this.commanderActive) {
+      this.commanderPhase += dtSeconds * 6
+      this.whistleTimer = Math.max(0, this.whistleTimer - dtSeconds)
+    }
+    const drown = this.waveSubmerge
+    const sway = Math.sin(this.wobblePhase) * (1 + hunger * 2) * (1 - drown * 0.5)
     // Vertical bob: idle wobble + beat-driven jump.
-    const beatBob = beatPulse * (4 + hunger * 3)
+    const beatBob = beatPulse * (4 + hunger * 3) * (1 - drown)
     // Catch-celebration vertical jump: parabolic sin(πt) curve so the
     // body briefly springs off the deck and lands cleanly. Suppressed
     // mid-swim because the swim orbit owns container.y and the body's
@@ -345,7 +425,7 @@ export class Penguin {
     }
     this.body.position.set(
       sway,
-      Math.sin(this.wobblePhase * 0.9) * 1.5 - beatBob - jumpOffset,
+      Math.sin(this.wobblePhase * 0.9) * 1.5 - beatBob - jumpOffset + drown * 22,
     )
     // Slight squash on beat impact so the bob reads as "landing".
     // Plus a small landing squash for the catch jump as it descends.
@@ -376,7 +456,25 @@ export class Penguin {
 
     // Apply scale.x — squash on Y, plus mirror on X while orbiting.
     const facing = this.swimT > 0.5 ? this.swimFacing : 1
-    this.body.scale.set(facing * squash, 2 - squash)
+    this.body.scale.set(facing * squash, (2 - squash) * (1 - drown * 0.12))
+
+    if (drown > 0.35 && this.mood !== 'worried' && this.mood !== 'weak') {
+      this.setMood('worried')
+    }
+    if (drown > 0.2) {
+      this.drownBubbleAccum += dtSeconds * (6 + drown * 18)
+      while (this.drownBubbleAccum > 1) {
+        this.drownBubbleAccum -= 1
+        this.airBubbles.push({
+          x: (Math.random() - 0.5) * 10,
+          y: 8 + drown * 6,
+          vx: (Math.random() - 0.5) * 12,
+          vy: -22 - Math.random() * 16,
+          r: 1.5 + Math.random() * 2,
+          t: 1,
+        })
+      }
+    }
 
     // Air bubbles trail from the swimming penguin. Spawn rate scales
     // with swimT so they fade in/out alongside the dive animation.
@@ -411,6 +509,37 @@ export class Penguin {
         // Transient expired — bring back the persistent request if any.
         this.applyPersistentRequest()
       }
+    }
+  }
+
+  private tickOverboard(dtSeconds: number): void {
+    this.overboardT += dtSeconds
+    const t = this.overboardT
+    const fallEnd = 0.55
+    const swimEnd = 2.6
+    if (t < fallEnd) {
+      const t01 = t / fallEnd
+      this.container.position.set(
+        this.restX + Math.sin(t01 * Math.PI) * 8,
+        this.restY + t01 * 52,
+      )
+      this.body.rotation = t01 * 0.9
+    } else if (t < swimEnd) {
+      const t01 = (t - fallEnd) / (swimEnd - fallEnd)
+      this.container.position.set(
+        this.restX - 40 - t01 * 220,
+        this.restY + 40 + Math.sin(t01 * Math.PI * 3) * 6,
+      )
+      this.body.scale.set(-1, 1)
+      this.body.rotation = Math.sin(t01 * Math.PI * 4) * 0.25
+      this.updateBubbles(dtSeconds)
+    } else if (this.overboardOnDone) {
+      const done = this.overboardOnDone
+      this.overboardOnDone = null
+      this.overboardDuration = 0
+      this.body.rotation = 0
+      this.body.scale.set(1, 1)
+      done()
     }
   }
 
@@ -574,19 +703,42 @@ export class Penguin {
    * to the penguin and never need to know the world transform.
    */
   private updateBubbles(dtSeconds: number): void {
-    if (this.swimT > 0.2) {
-      this.bubbleSpawnAccum += dtSeconds * (4 + this.swimT * 8)
+    const activeSwim = this.swimT > 0.2 || this.isBackView
+    if (activeSwim) {
+      let spawnRate = 4 + this.swimT * 8
+      if (this.isBackView) {
+        if (this.underwaterState === 'dash') {
+          spawnRate = 30 // Extreme bubbles for dash!
+        } else if (this.underwaterState === 'glide' || this.underwaterState === 'glide_dual') {
+          spawnRate = 12 // Nice bubble trail for glide!
+        } else {
+          spawnRate = 5
+        }
+      }
+
+      this.bubbleSpawnAccum += dtSeconds * spawnRate
       while (this.bubbleSpawnAccum > 1) {
         this.bubbleSpawnAccum -= 1
-        // Origin: behind the beak/face area. Slight random spread so
-        // the trail doesn't look mechanical.
-        const x = -6 + (Math.random() - 0.5) * 12
-        const y = -4 + (Math.random() - 0.5) * 6
+        // Origin: behind the beak/face area or feet/wings
+        let x = -6 + (Math.random() - 0.5) * 12
+        let y = -4 + (Math.random() - 0.5) * 6
+        let vx = (Math.random() - 0.5) * 14
+        let vy = -22 - Math.random() * 20
+
+        if (this.isBackView) {
+          // From behind, bubbles should trail backwards (towards the screen/camera, i.e., positive Z/Y/X)
+          // In 2D, they should float upwards and spread outwards
+          x = (Math.random() - 0.5) * 24
+          y = 20 + (Math.random() - 0.5) * 10 // Spawn near the feet
+          vx = (Math.random() - 0.5) * 30
+          vy = 10 + Math.random() * 30 // Move downwards/backwards relative to the dashing penguin!
+        }
+
         this.airBubbles.push({
           x,
           y,
-          vx: (Math.random() - 0.5) * 14,
-          vy: -22 - Math.random() * 20,
+          vx,
+          vy,
           r: 1.4 + Math.random() * 2.2,
           t: 1,
         })
@@ -633,6 +785,27 @@ export class Penguin {
   private drawPenguin(): void {
     const g = this.bodyBg
     g.clear()
+
+    if (this.isBackView) {
+      // Draw Penguin from Behind
+      // Body
+      g.ellipse(0, 8, 28, 36)
+      g.fill(0x141414)
+
+      // Cute little wiggling tail
+      g.poly([-6, 34, 6, 34, 0, 42])
+      g.fill(0x141414)
+
+      // Feet
+      g.ellipse(-12, 40, 8, 4)
+      g.fill(0xff9425)
+      g.ellipse(12, 40, 8, 4)
+      g.fill(0xff9425)
+
+      // No belly, no beak from behind!
+      return
+    }
+
     // Body
     g.ellipse(0, 8, 28, 36)
     g.fill(0x141414)
@@ -657,6 +830,9 @@ export class Penguin {
   private redrawFace(): void {
     const g = this.face
     g.clear()
+    if (this.isBackView) {
+      return
+    }
     // Cheeks first (under everything) for moods that should look flushed.
     if (
       this.mood === 'happy' ||
@@ -713,6 +889,71 @@ export class Penguin {
   private redrawFlippers(): void {
     const g = this.flippers
     g.clear()
+
+    if (this.isBackView) {
+      let leftAngle = 2.1
+      let rightAngle = 1.0
+      let armLength = 16
+
+      switch (this.underwaterState) {
+        case 'glide':
+          leftAngle = 2.8
+          rightAngle = 0.35
+          break
+        case 'glide_dual':
+          leftAngle = Math.PI
+          rightAngle = 0
+          armLength = 20 // Stretch out even longer for dual glide!
+          break
+        case 'dash':
+          leftAngle = 1.8
+          rightAngle = 1.34
+          break
+        case 'eat':
+          leftAngle = -1.9
+          rightAngle = -1.2
+          break
+        case 'neutral':
+        default:
+          leftAngle = 2.1
+          rightAngle = 1.0
+          break
+      }
+
+      // Add a small beat-driven flap
+      const flap = this.lastBeatPulse * 0.25
+      leftAngle -= flap
+      rightAngle += flap
+
+      drawFlipperArm(g, -18, 8, leftAngle, armLength)
+      drawFlipperArm(g, 18, 8, rightAngle, armLength)
+      return
+    }
+
+    if (this.commanderActive) {
+      const wave = Math.sin(this.commanderPhase) * 0.25
+      const flagAngle = this.commanderDir === 'left' ? 2.6 + wave : 0.5 - wave
+      drawFlipperArm(g, -16, 6, 2.2, 14)
+      drawFlipperArm(g, 16, 4, flagAngle, 14)
+      const poleX = this.commanderDir === 'left' ? 28 : -28
+      g.moveTo(poleX, -8)
+      g.lineTo(poleX, -34)
+      g.stroke({ color: 0x5a3810, width: 2.5 })
+      const flagWave = Math.sin(this.commanderPhase * 1.4) * 4
+      const fx = poleX + (this.commanderDir === 'left' ? -1 : 1) * 2
+      g.poly([
+        fx, -32,
+        fx + (this.commanderDir === 'left' ? -18 : 18) + flagWave, -28,
+        fx + (this.commanderDir === 'left' ? -16 : 16) + flagWave * 0.6, -20,
+        fx, -22,
+      ])
+      g.fill({ color: 0xff6b6b, alpha: 0.95 })
+      if (this.whistleTimer > 0) {
+        g.circle(4, -6, 5 + this.whistleTimer * 4)
+        g.stroke({ color: 0xffffff, width: 1.5, alpha: this.whistleTimer * 0.6 })
+      }
+      return
+    }
     // Resting angles in radians measured FROM the body anchor point,
     // 0 = pointing right, π/2 = pointing down. Different per flipper
     // because they're on opposite sides of the body.

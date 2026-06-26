@@ -3,234 +3,291 @@ import type { IFishingState } from '../StateMachine'
 import type { FishingContext } from '../FishingContext'
 import type { FishingStateId, FishDef } from '../types'
 import type { AmbientFish } from '../entities/FishSchool'
+import type { LureDirection } from '../ui/LurePads'
+import type { TapJudgement } from '../ui/PullPanel'
 import { pickFishForBite } from '../data/FishCatalog'
-import { HookedState } from './HookedState'
+import { UnderwaterRhythmState } from './UnderwaterRhythmState'
 import { SailingState } from './SailingState'
 
+/** Successful on-beat dual swipes needed to hook a fish. */
+const ROUNDS_TO_BITE = 5
+const MAX_FAILS = 4
+/** Downbeats after enter before the first preview. */
+const INTRO_DOWNBEATS = 2
+
+type LureRoundPhase = 'intro' | 'preview' | 'hit' | 'idle'
+
 /**
- * Hook is hovering at depth — the "luring" phase, reframed as a musical
- * CALL-AND-RESPONSE duet with the fish (the opening phrase of the
- * fishing performance):
- *
- *   1. CALL  — the game "sings" a short rhythmic motif (a pattern of
- *              hits over one 4-beat bar). Each hit flashes a beat pip and
- *              plays a pentatonic note.
- *   2. LISTEN — the player echoes it back by tapping REEL on those same
- *              beats. On-beat echoes charge the bite; a clean bar lands
- *              the fish.
- *
- * This is a zero-stakes, teach-by-playing on-ramp: the player learns to
- * feel the beat before any tension/willpower is on the line.
- *
- * Fallback: until the audio context is unlocked (no BeatClock), we keep
- * the original "tap REEL to twitch + passive interest" behaviour so the
- * line never gets stuck waiting for a clock that never started.
+ * Hook hovering at depth — each attempt is two beats:
+ *   1. PREVIEW — direction + shrinking ring (full beat of lead time)
+ *   2. HIT — dual swipe on the downbeat
  */
-
-/** One 4-beat bar. `true` = a hit the player should echo. */
-const LURE_PATTERN: ReadonlyArray<boolean> = [true, false, true, false]
-
-/** ms either side of a beat that still counts as an on-beat echo. */
-const ECHO_WINDOW_MS = 170
-
 export class WaitingState implements IFishingState {
   readonly id: FishingStateId = 'waiting'
   private readonly ctx: FishingContext
 
-  /** 0..1 accumulator: rises with correct echoes (+ slow passive). */
-  private biteCharge = 0
-  private timeWaited = 0
-  private autoUnsubscribe: (() => void) | null = null
+  private lureProgress = 0
+  private successCount = 0
+  private failCount = 0
+  private roundIndex = 0
+  private commandDir: LureDirection = 'left'
+  private finished = false
+  private targetDef: FishDef | null = null
+  private leadFish: AmbientFish | null = null
 
-  // ---- Call-and-response lure ----
-  private lureActive = false
-  private pattern: ReadonlyArray<boolean> = LURE_PATTERN
-  /** Beat index where the single call/response round begins. */
-  private roundStartBeat = 0
-  private phase: 'call' | 'listen' = 'call'
-  private echoes: Array<'none' | 'good' | 'miss'> = ['none', 'none', 'none', 'none']
-  private roundCompleted = false
+  private phase: LureRoundPhase = 'intro'
+  private roundOpen = false
+  private awaitingNextRound = false
+  private introBeatsLeft = INTRO_DOWNBEATS
+  private prevBeatPhase = 0.5
+  private fallbackBeatTimer = 0
+
+  private readonly swipeListener: (judgement: TapJudgement, dirOk: boolean) => void
 
   constructor(ctx: FishingContext) {
     this.ctx = ctx
+    this.swipeListener = (judgement, dirOk) => this.onDualSwipe(judgement, dirOk)
   }
 
   enter(): void {
-    this.biteCharge = 0
-    this.timeWaited = 0
-    this.ctx.reelButtons.setVisible(true)
+    this.lureProgress = 0
+    this.successCount = 0
+    this.failCount = 0
+    this.roundIndex = 0
+    this.commandDir = Math.random() < 0.5 ? 'left' : 'right'
+    this.finished = false
+    this.leadFish = null
+    this.phase = 'intro'
+    this.roundOpen = false
+    this.awaitingNextRound = false
+    this.introBeatsLeft = INTRO_DOWNBEATS
+    this.prevBeatPhase = this.ctx.beatClock.started ? this.ctx.beatClock.phase() : 0.5
+    this.fallbackBeatTimer = 0
 
-    this.lureActive = this.ctx.beatClock.started
-    if (this.lureActive) {
-      this.ctx.eventOverlay.showLure()
-      this.startRound()
-    } else if (!this.ctx.penguin.isShowingTransientMessage()) {
-      this.ctx.penguin.showMessage(t('game.waitingHint'), 'neutral', 2400)
-    }
+    this.ctx.pullPanel.container.visible = false
+    this.ctx.reelButtons.setVisible(false)
+    this.ctx.eventOverlay.hide()
+    this.ctx.hook.setMode('hover')
+    this.ctx.hook.clearLineCue()
 
-    const reelHandler = () => this.handleReel()
-    const fastHandler = () => this.handleFastReel()
-    this.ctx.reelButtons.onReel = reelHandler
-    this.ctx.reelButtons.onFastReel = fastHandler
-    this.autoUnsubscribe = () => {
-      if (this.ctx.reelButtons.onReel === reelHandler) this.ctx.reelButtons.onReel = null
-      if (this.ctx.reelButtons.onFastReel === fastHandler) this.ctx.reelButtons.onFastReel = null
-    }
+    const { hook, viewport, weatherSystem, progression, commissionFish } = this.ctx
+    const depth01 = (hook.y - viewport.waterLineY) / Math.max(1, viewport.maxDepth)
+    this.targetDef =
+      commissionFish ??
+      pickFishForBite(
+        weatherSystem.get(),
+        depth01,
+        Math.random,
+        progression.index * 0.15,
+        progression.stage.zone,
+      )
+
+    this.ctx.lurePads.reset()
+    this.ctx.lurePads.setVisible(true)
+    this.ctx.lurePads.setProgress(0, ROUNDS_TO_BITE)
+    this.ctx.lurePads.onDualSwipe = this.swipeListener
+
+    this.ctx.penguin.setCommanderMode(true, this.commandDir)
+    this.ctx.penguin.showMessage(t('game.lureCommandIntro'), 'request', 2800)
+    this.ctx.audio.playLureCall(0)
+
+    this.syncFishSchool()
   }
 
   update(dtSeconds: number, _elapsedMs: number): void {
-    this.timeWaited += dtSeconds
+    if (this.finished) return
 
-    if (this.lureActive && this.ctx.beatClock.started && !this.roundCompleted) {
-      this.updateLure()
+    this.ctx.lurePads.update(dtSeconds, performance.now())
+
+    const clock = this.ctx.beatClock
+    if (clock.started) {
+      const phase = clock.phase()
+      const isDownbeat =
+        (this.prevBeatPhase > 0.6 && phase < 0.4) || phase < this.prevBeatPhase - 0.5
+      if (isDownbeat) this.onDownbeat()
+      this.prevBeatPhase = phase
     } else {
-      // Fallback: original passive interest model.
-      this.biteCharge = Math.min(1, this.biteCharge + dtSeconds * 0.06)
-      const chance = this.biteCharge * dtSeconds * 0.6
-      if (this.timeWaited > 1 && Math.random() < chance) {
-        this.commitBite()
+      this.tickFallbackBeat(dtSeconds)
+    }
+
+    this.syncFishSchool()
+    this.ctx.hook.fightOffsetX = Math.sin(performance.now() * 0.004) * (8 + this.lureProgress * 12) * 0.3
+    this.ctx.hook.fightOffsetY = Math.sin(performance.now() * 0.005) * 2
+  }
+
+  exit(): void {
+    this.ctx.lurePads.setVisible(false)
+    if (this.ctx.lurePads.onDualSwipe === this.swipeListener) {
+      this.ctx.lurePads.onDualSwipe = () => {}
+    }
+    this.ctx.penguin.setCommanderMode(false)
+    this.ctx.fishSchool.setLureGather(0, 0, 0, false)
+    this.ctx.hook.fightOffsetX = 0
+    this.ctx.hook.fightOffsetY = 0
+  }
+
+  private tickFallbackBeat(dtSeconds: number): void {
+    this.fallbackBeatTimer += dtSeconds
+    const beatSec = this.ctx.beatClock.beatIntervalSec || 60 / 92
+    if (this.fallbackBeatTimer < beatSec) return
+    this.fallbackBeatTimer = 0
+    this.onDownbeat()
+  }
+
+  private onDownbeat(): void {
+    if (this.finished) return
+
+    if (this.phase === 'intro') {
+      this.introBeatsLeft -= 1
+      if (this.introBeatsLeft <= 0) {
+        this.armPreview()
       }
       return
     }
 
-    // A slow passive trickle while the single round is running.
-    this.biteCharge = Math.min(1, this.biteCharge + dtSeconds * 0.02)
-    if (this.biteCharge >= 1 && this.timeWaited > 1) {
-      this.commitBite()
-    }
-  }
-
-  exit(): void {
-    this.autoUnsubscribe?.()
-    this.autoUnsubscribe = null
-    this.ctx.eventOverlay.hide()
-  }
-
-  // ---- Single lure round lifecycle ----
-
-  private startRound(): void {
-    // One-beat lead-in so the first call note never fires mid-beat.
-    this.roundStartBeat = this.ctx.beatClock.nextBeatAfterPerf(performance.now()) + 1
-    this.phase = 'call'
-    this.echoes = ['none', 'none', 'none', 'none']
-    this.roundCompleted = false
-    // Pre-schedule the whole CALL phrase against the audio clock so it
-    // stays phase-locked with the groove bed.
-    for (let i = 0; i < this.pattern.length; i += 1) {
-      if (!this.pattern[i]) continue
-      this.ctx.audio.playLureCallOnBeat(this.roundStartBeat + i, i)
-    }
-    this.pushOverlay(-1)
-  }
-
-  private updateLure(): void {
-    const now = performance.now()
-    const beat = this.ctx.beatClock.currentBeat(now)
-    const callEnd = this.roundStartBeat + 4 // first listen beat
-    const roundEnd = this.roundStartBeat + 8
-
-    // One round only — score once and move on.
-    if (beat >= roundEnd) {
-      this.finishRound()
+    if (this.awaitingNextRound) {
+      this.awaitingNextRound = false
+      this.armPreview()
       return
     }
 
-    if (beat < callEnd) {
-      // CALL phase is already pre-scheduled in audio time; here we only
-      // update the visual cursor.
-      this.phase = 'call'
-      const activeIdx = beat - this.roundStartBeat
-      this.pushOverlay(activeIdx >= 0 && activeIdx < 4 ? activeIdx : -1)
-    } else {
-      // LISTEN phase: player echoes via REEL taps (handleReel).
-      this.phase = 'listen'
-      const activeIdx = beat - callEnd
-      this.pushOverlay(activeIdx >= 0 && activeIdx < 4 ? activeIdx : -1)
+    if (this.phase === 'hit' && this.roundOpen) {
+      this.closeRound(false)
+      return
+    }
+
+    if (this.phase === 'preview') {
+      this.beginHitWindow()
     }
   }
 
-  private finishRound(): void {
-    if (this.roundCompleted) return
-    this.roundCompleted = true
-    const hits = this.pattern.filter(Boolean).length
-    const good = this.echoes.filter((e) => e === 'good').length
-    // One pass only: once the player finishes this single phrase, we move
-    // on to hook resolution. Better accuracy gives a nicer payoff.
-    const passed = hits > 0 && good >= Math.ceil(hits * 0.67)
+  /** Full beat of wind-up: show direction + shrinking telegraph ring. */
+  private armPreview(): void {
+    this.roundIndex += 1
+    if (this.roundIndex > 1) {
+      this.commandDir = this.commandDir === 'left' ? 'right' : 'left'
+    }
+
+    this.phase = 'preview'
+    this.roundOpen = false
+    this.ctx.lurePads.setCommandDirection(this.commandDir)
+    this.ctx.lurePads.setProgress(this.successCount, ROUNDS_TO_BITE)
+    this.ctx.lurePads.setPadPhase('preview')
+    this.ctx.penguin.setCommanderMode(true, this.commandDir)
+
+    const dirLabel =
+      this.commandDir === 'left' ? t('game.directionLeft') : t('game.directionRight')
+    this.ctx.penguin.showMessage(t('game.lurePreview', { dir: dirLabel }), 'request', 1200)
+  }
+
+  /** Downbeat after preview — open the hit window for this beat. */
+  private beginHitWindow(): void {
+    this.phase = 'hit'
+    this.roundOpen = true
+    this.ctx.lurePads.setListenActive(true)
+    this.ctx.audio.playLureCall(this.roundIndex % 5)
+    this.ctx.penguin.showMessage(t('game.lureNow'), 'excited', 500)
+  }
+
+  private onDualSwipe(judgement: TapJudgement, dirOk: boolean): void {
+    if (this.finished || !this.roundOpen || this.phase !== 'hit') return
+    const ok = dirOk && judgement !== 'miss'
+    this.closeRound(ok, judgement)
+  }
+
+  private closeRound(success: boolean, judgement: TapJudgement = 'miss'): void {
+    if (!this.roundOpen && !success) return
+    this.roundOpen = false
+    this.phase = 'idle'
+    this.ctx.lurePads.closeRound()
+
+    if (success) {
+      this.successCount += 1
+      this.lureProgress = Math.min(1, this.lureProgress + 1 / ROUNDS_TO_BITE)
+      this.ctx.audio.playLureEcho(this.successCount % 5, judgement === 'perfect')
+      this.ctx.shake(3, 0.12)
+      this.spawnGatherFish()
+      if (this.successCount >= ROUNDS_TO_BITE || this.lureProgress >= 1) {
+        this.finishLure(true)
+        return
+      }
+    } else {
+      this.failCount += 1
+      this.lureProgress = Math.max(0, this.lureProgress - 0.08)
+      this.ctx.audio.playFail()
+      this.ctx.shake(5, 0.18)
+      this.ctx.penguin.showMessage(t('game.lureMiss'), 'worried', 700)
+      if (this.failCount >= MAX_FAILS) {
+        this.finishLure(false)
+        return
+      }
+    }
+
+    if (!this.finished) {
+      this.awaitingNextRound = true
+    }
+  }
+
+  private spawnGatherFish(): void {
+    if (!this.targetDef) return
+    const { hook, fishSchool } = this.ctx
+    const count = this.successCount === 1 ? 2 : 1
+    fishSchool.spawnLureFish(hook.x, hook.y, this.targetDef, count)
+    if (!this.leadFish) {
+      const near = fishSchool.pickNearestFish(hook.x, hook.y, 160)
+      if (near) this.leadFish = near.fish
+    }
+  }
+
+  private syncFishSchool(): void {
+    const { hook, fishSchool } = this.ctx
+    const danceDir: 1 | -1 = this.commandDir === 'left' ? -1 : 1
+    fishSchool.setLureGather(this.lureProgress, hook.x, hook.y, true, danceDir)
+  }
+
+  private finishLure(passed: boolean): void {
+    if (this.finished) return
+    this.finished = true
+    this.roundOpen = false
+    this.ctx.lurePads.closeRound()
+
     if (passed) {
-      this.biteCharge = Math.min(1, this.biteCharge + 0.34)
-    }
-    this.commitBite(passed)
-  }
-
-  private pushOverlay(activeBeat: number): void {
-    const headline = this.phase === 'call' ? t('game.lureListen') : t('game.lureEcho')
-    const color = this.phase === 'call' ? '#ffd166' : '#9fe6ff'
-    this.ctx.eventOverlay.setLureState(
-      this.pattern as boolean[],
-      this.phase,
-      activeBeat,
-      this.echoes,
-      headline,
-      color,
-    )
-  }
-
-  // ---- Input ----
-
-  private handleReel(): void {
-    this.ctx.hook.twitchUp(14)
-
-    if (!this.lureActive || !this.ctx.beatClock.started || this.phase !== 'listen') {
-      // Plain twitch (fallback, or during the call phase).
-      this.ctx.audio.playReelClick()
-      if (!this.lureActive) this.biteCharge = Math.min(1, this.biteCharge + 0.12)
-      return
-    }
-
-    // Echo: match this tap to the nearest listen beat.
-    const now = performance.now()
-    const nearestBeat = this.ctx.beatClock.nearestBeatIndex(now)
-    const idx = nearestBeat - (this.roundStartBeat + 4)
-    if (idx < 0 || idx > 3) {
-      this.ctx.audio.playReelClick()
-      return
-    }
-    const offset = Math.abs(this.ctx.beatClock.msFromNearestBeat(now))
-    const onBeat = offset <= ECHO_WINDOW_MS
-    if (this.pattern[idx] && onBeat && this.echoes[idx] !== 'good') {
-      this.echoes[idx] = 'good'
-      this.ctx.audio.playLureEcho(idx, true)
-      this.biteCharge = Math.min(1, this.biteCharge + 0.16)
+      this.ctx.penguin.showMessage(t('game.lureHooked'), 'excited', 1400)
+      this.commitBite(true)
     } else {
-      if (this.echoes[idx] === 'none') this.echoes[idx] = 'miss'
-      this.ctx.audio.playLureEcho(idx, false)
+      this.ctx.penguin.showMessage(t('game.lureFail'), 'sad', 2000)
+      this.ctx.audio.playFail()
+      this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)
+      this.ctx.goTo(new SailingState(this.ctx))
     }
   }
 
-  private handleFastReel(): void {
-    this.ctx.audio.playReelClick()
-    this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)
-    this.ctx.goTo(new SailingState(this.ctx))
-  }
-
-  private commitBite(withLureSuccessSfx = false): void {
+  private commitBite(withSuccessSfx = false): void {
+    if (withSuccessSfx) this.ctx.audio.playLureSuccess()
     const { fishSchool, hook, viewport, weatherSystem, progression } = this.ctx
-    if (withLureSuccessSfx) this.ctx.audio.playLureSuccess()
     const depth01 = (hook.y - viewport.waterLineY) / Math.max(1, viewport.maxDepth)
-    const nearby = fishSchool.pickNearestFish(hook.x, hook.y, 240)
     const stageIndex = progression.index
-    const wantHarder = Math.random() < Math.min(0.7, stageIndex * 0.2)
-    const ambient: { fish: AmbientFish; def: FishDef } =
-      nearby && !wantHarder
-        ? nearby
-        : fishSchool.spawnNear(
-            hook.x,
-            hook.y,
-            pickFishForBite(weatherSystem.get(), depth01, Math.random, stageIndex * 0.15),
-          )
+    const def =
+      this.targetDef ??
+      pickFishForBite(
+        weatherSystem.get(),
+        depth01,
+        Math.random,
+        stageIndex * 0.15,
+        progression.stage.zone,
+      )
+    let ambient: { fish: AmbientFish; def: FishDef }
+    if (this.leadFish) {
+      ambient = { fish: this.leadFish, def }
+    } else {
+      const nearby = fishSchool.pickNearestFish(hook.x, hook.y, 200)
+      ambient = nearby ?? fishSchool.spawnNear(hook.x, hook.y, def)
+    }
     this.ctx.activeBiter = { def: ambient.def }
     this.ctx.audio.playBiteAlert()
-    this.ctx.goTo(new HookedState(this.ctx), { ambient })
+    this.ctx.penguin.setCommanderMode(false)
+    this.ctx.penguin.showMessage(t('game.battleIntro'), 'excited', 2200)
+    this.ctx.goTo(new UnderwaterRhythmState(this.ctx), { ambient: ambient.fish })
   }
 }
+

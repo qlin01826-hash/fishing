@@ -5,26 +5,17 @@ import type { BeatClock } from '../systems/BeatClock'
 /** Per-tap accuracy buckets, used by the visual layer and the scoring math. */
 export type TapJudgement = 'perfect' | 'good' | 'miss'
 
+/** Wave-breaking vs. cast-hook vs. tug-of-war lure vs. fish fight. */
+export type PullPanelMode = 'wave' | 'cast' | 'tugFish' | 'tugPull' | 'battle'
+
 /**
- * Bottom-left rhythm panel used during BattleState.
+ * Bottom-left rhythm panel used during SailingState and BattleState.
  *
- * It's the "底拍" (base-beat) layer of the music game:
- *   - tap in time with the {@link BeatClock} → big short-lived impulse
- *   - hold → steady Stardew-style pressure
- *   - perfect taps build a combo that multiplies the impulse, so the
- *     player feels rewarded for syncing to the drum loop.
- *
- * Visuals (matches the user's reference sketch):
- *   - large circular hit zone in the bottom-left of the screen
- *   - a shrinking outer ring tells the player when the next beat lands
- *     (Osu!-style: ring meets the inner target at beat impact)
- *   - the inner target flashes briefly on each beat for extra clarity
- *   - last judgement ("PERFECT!" / "GOOD" / "MISS") floats up and fades
- *   - combo counter sits above the panel
- *
- * The panel owns its hit testing — BattleState delegates pointer-down
- * geometry to {@link containsLocalPoint} so we don't duplicate the
- * circular-vs-rectangular distinction.
+ * It's the "破浪" (wave-breaking) layer:
+ *   - tap in time with the downbeat → the hull rides the crest
+ *   - mistimed taps shove the boat off course
+ *   - after N waves, the panel briefly becomes "甩钩" for a one-beat
+ *     cast window (SailingState only)
  */
 export class PullPanel {
   readonly container = new Container()
@@ -57,7 +48,7 @@ export class PullPanel {
    * the tension tracker. Defaults to a no-op so the panel works
    * standalone in unit tests.
    */
-  onJudgement: (judgement: TapJudgement, nowMs: number) => void = () => {}
+  onJudgement: (judgement: TapJudgement, nowMs: number, beatPhase: number) => void = () => {}
 
   private pressing = false
   private pressStart = 0
@@ -76,6 +67,10 @@ export class PullPanel {
   private missFlash = 0
 
   private beatClock: BeatClock | null = null
+  private mode: PullPanelMode = 'wave'
+  /** Waves cleared since last cast window (shown as a small arc). */
+  private waveProgress = 0
+  private waveProgressTarget = 4
 
   /** Radius of the perfect-timing window in ms either side of a beat. */
   private readonly perfectWindowMs = 90
@@ -84,7 +79,7 @@ export class PullPanel {
 
   constructor() {
     this.label = new Text({
-      text: t('game.pullButton'),
+      text: t('game.waveButton'),
       style: new TextStyle({
         fontSize: 22,
         fontFamily: 'Menlo, Consolas, monospace',
@@ -94,7 +89,7 @@ export class PullPanel {
     })
     this.label.anchor.set(0.5, 0.5)
     this.hint = new Text({
-      text: 'TAP · SPACE',
+      text: t('game.waveHint'),
       style: new TextStyle({
         fontSize: 11,
         fontFamily: 'Menlo, Consolas, monospace',
@@ -150,6 +145,42 @@ export class PullPanel {
 
   attachBeatClock(clock: BeatClock): void {
     this.beatClock = clock
+  }
+
+  setMode(mode: PullPanelMode): void {
+    this.mode = mode
+    switch (mode) {
+      case 'cast':
+        this.label.text = t('game.castHookButton')
+        this.hint.text = t('game.castHookHint')
+        break
+      case 'tugFish':
+        this.label.text = t('game.tugFishWait')
+        this.hint.text = t('game.tugFishHint')
+        break
+      case 'tugPull':
+        this.label.text = t('game.tugPullButton')
+        this.hint.text = t('game.tugPullHint')
+        break
+      case 'battle':
+        this.label.text = t('game.pullButton')
+        this.hint.text = t('game.battlePullHint')
+        break
+      default:
+        this.label.text = t('game.waveButton')
+        this.hint.text = t('game.waveHint')
+    }
+    this.bg.eventMode = mode === 'tugFish' ? 'none' : 'static'
+    this.bg.cursor = mode === 'tugFish' ? 'default' : 'pointer'
+  }
+
+  getMode(): PullPanelMode {
+    return this.mode
+  }
+
+  setWaveProgress(cleared: number, target: number): void {
+    this.waveProgress = cleared
+    this.waveProgressTarget = Math.max(1, target)
   }
 
   /**
@@ -219,10 +250,17 @@ export class PullPanel {
     this.struggling = false
     this.ripples.length = 0
     this.missFlash = 0
+    this.mode = 'wave'
+    this.waveProgress = 0
+  }
+
+  /** Programmatic tap (SailingState cast window uses this). */
+  externalTap(): TapJudgement {
+    return this.triggerTapInternal()
   }
 
   private handleDown(_event: FederatedPointerEvent): void {
-    this.triggerTap()
+    this.triggerTapInternal()
   }
 
   private handleUp(_event: FederatedPointerEvent): void {
@@ -234,7 +272,7 @@ export class PullPanel {
    * FishingScene so PC players have a one-handed rhythm interface.
    */
   keyboardTap(): void {
-    this.triggerTap()
+    this.triggerTapInternal()
   }
 
   /** Keyboard equivalent of finger lift (Space released). */
@@ -247,9 +285,10 @@ export class PullPanel {
    * matter the input device". Used by both Pixi pointer events and
    * keyboard events.
    */
-  private triggerTap(): void {
+  private triggerTapInternal(): TapJudgement {
     const now = performance.now()
     const judgement = this.judgeTap(now)
+    const beatPhase = this.beatClock?.started ? this.beatClock.phase(now) : 0.5
     const recentHz =
       this.recentTaps.length >= 2
         ? (this.recentTaps.length - 1) /
@@ -262,15 +301,14 @@ export class PullPanel {
     this.tapPower = Math.min(1, this.tapPower + base * accuracyMul * this.comboMultiplier)
     this.recentTaps.push(now)
     this.applyJudgement(judgement)
-    // Visual feedback: every tap emits a ripple coloured by judgement so
-    // the player gets immediate, kinetic confirmation of timing.
     const color =
-      judgement === 'perfect' ? 0xffd166 : judgement === 'good' ? 0x9fe6ff : 0xff6b6b
+      judgement === 'perfect' ? 0x9fe6ff : judgement === 'good' ? 0x7ec8e3 : 0xff6b6b
     this.ripples.push({ t: 1, color })
     if (judgement === 'miss') this.missFlash = 1
     this.pressing = true
     this.pressStart = now
-    this.onJudgement(judgement, now)
+    this.onJudgement(judgement, now, beatPhase)
+    return judgement
   }
 
   private releaseHold(): void {
@@ -301,47 +339,91 @@ export class PullPanel {
     // Combo multiplier saturates at 1.5x after 8 perfect taps.
     this.comboMultiplier = 1 + Math.min(0.5, this.comboCount * 0.06)
     this.judgement.text =
-      judgement === 'perfect' ? 'PERFECT!' : judgement === 'good' ? 'GOOD' : 'MISS'
+      judgement === 'perfect'
+        ? t('game.wavePerfect')
+        : judgement === 'good'
+          ? t('game.waveGood')
+          : t('game.waveMiss')
     this.judgement.style.fill =
-      judgement === 'perfect' ? '#ffd166' : judgement === 'good' ? '#9fe6ff' : '#ff6b6b'
+      judgement === 'perfect' ? '#9fe6ff' : judgement === 'good' ? '#7ec8e3' : '#ff6b6b'
   }
 
   private draw(nowMs = performance.now()): void {
     const outerR = this.outerRadius
     const innerR = this.innerRadius
 
-    // Beat-driven flash brightness for the inner target.
     let flash = 0
     let beatPhase = 0.5
     if (this.beatClock?.started) {
       beatPhase = this.beatClock.phase(nowMs)
-      // Brief bright pulse right after each beat (first 18% of beat).
       flash = beatPhase < 0.18 ? 1 - beatPhase / 0.18 : 0
     }
 
     const bg = this.bg
     bg.clear()
-    // Outer disc (the hit zone). Background tint shifts toward red when
-    // the fish is actively struggling, which (combined with the outline
-    // pulse) reads at a glance.
     bg.circle(0, 0, outerR)
-    const bgColor = this.struggling ? 0x4a1414 : 0x081827
-    bg.fill({ color: bgColor, alpha: 0.78 })
-    const rimColor = this.struggling ? 0xff6b6b : 0xffefb0
+    const castMode = this.mode === 'cast'
+    const tugFish = this.mode === 'tugFish'
+    const tugPull = this.mode === 'tugPull'
+    const battleMode = this.mode === 'battle'
+    const bgColor = this.struggling
+      ? 0x4a1414
+      : castMode
+        ? 0x1a2838
+        : tugFish
+          ? 0x0a1420
+          : battleMode
+            ? 0x102038
+            : 0x081827
+    bg.fill({ color: bgColor, alpha: tugFish ? 0.55 : 0.78 })
+    const rimColor = castMode
+      ? 0xffe07a
+      : tugPull || battleMode
+        ? 0xffd166
+        : tugFish
+          ? 0x4a6080
+          : this.struggling
+            ? 0xff6b6b
+            : 0x9fe6ff
     bg.stroke({ color: rimColor, width: 2, alpha: 0.85 })
-    // Inner target (the "click here" hot spot)
     bg.circle(0, 0, innerR)
-    bg.fill({ color: 0xffe39a, alpha: 0.12 + 0.55 * flash })
-    bg.stroke({ color: 0xffd166, width: 3, alpha: 0.7 + 0.3 * flash })
+    bg.fill({
+      color: castMode ? 0xffe07a : 0x9fe6ff,
+      alpha: 0.12 + 0.55 * flash,
+    })
+    bg.stroke({ color: rimColor, width: 3, alpha: 0.7 + 0.3 * flash })
 
-    // Osu!-style shrinking beat ring: starts at outer rim, contracts
-    // toward the inner target as the next beat approaches.
     const ring = this.beatRing
     ring.clear()
-    if (this.beatClock?.started) {
+    if (this.beatClock?.started && !castMode && !tugFish && !tugPull && !battleMode) {
+      // Incoming wave crest — horizontal arc rises toward the hull icon.
+      const waveY = innerR * 0.35 - beatPhase * innerR * 1.1
+      ring.moveTo(-outerR * 0.75, waveY)
+      for (let i = 0; i <= 12; i += 1) {
+        const x = -outerR * 0.75 + (outerR * 1.5 * i) / 12
+        const y = waveY + Math.sin((i / 12) * Math.PI * 2 + beatPhase * 6) * 4
+        ring.lineTo(x, y)
+      }
+      ring.stroke({ color: 0x9fe6ff, width: 4, alpha: 0.35 + 0.5 * (1 - beatPhase) })
+    } else if (this.beatClock?.started && (castMode || tugPull || battleMode)) {
       const r = innerR + (outerR * 0.95 - innerR) * (1 - beatPhase)
       ring.circle(0, 0, r)
-      ring.stroke({ color: 0xffd166, width: 5, alpha: 0.35 + 0.5 * (1 - beatPhase) })
+      const ringColor = castMode ? 0xffe07a : 0xffd166
+      ring.stroke({ color: ringColor, width: 5, alpha: 0.5 + 0.45 * (1 - beatPhase) })
+    } else if (tugFish && this.beatClock?.started) {
+      const drop = innerR * beatPhase
+      ring.moveTo(-outerR * 0.5, -drop)
+      ring.lineTo(0, innerR * 0.4 - drop)
+      ring.lineTo(outerR * 0.5, -drop)
+      ring.stroke({ color: 0x4a6080, width: 4, alpha: 0.5 })
+    }
+
+    if (!castMode && !tugFish && !tugPull && !battleMode && this.waveProgressTarget > 0) {
+      const prog = Math.min(1, this.waveProgress / this.waveProgressTarget)
+      if (prog > 0.01) {
+        ring.arc(0, 0, outerR - 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * prog)
+        ring.stroke({ color: 0xffe07a, width: 3, alpha: 0.65 })
+      }
     }
 
     // Tap power: gold arc on the top half of the rim.
