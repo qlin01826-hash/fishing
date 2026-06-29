@@ -1,6 +1,7 @@
 import { Container, Graphics } from 'pixi.js'
 import type { ViewportContext, WeatherSnapshot } from '../types'
 import type { TimeOfDaySnapshot } from '../systems/TimeOfDaySystem'
+import { seabedY } from '../utils/depthTerrain'
 
 /**
  * Sky + sea + underwater background.
@@ -41,6 +42,7 @@ export class Ocean {
   private readonly rain = new Graphics()
   private readonly flash = new Graphics()
   private readonly depthBands = new Graphics()
+  private readonly crestFoam = new Graphics()
 
   private waveOffset = 0
   private rainOffset = 0
@@ -53,11 +55,24 @@ export class Ocean {
    * ladder feels like sinking into a pressurised, ominous deep.
    */
   private depthMood = 0
+  private scrollPx = 0
+  /** Extra crest height when the player breaks a wave on-beat (0..1). */
+  private waveBreakSurge = 0
+  /** World-x foam burst when the hull clears a crest. */
+  private crestBurstX = -9999
+  private crestBurstT = 0
 
   constructor(viewport: ViewportContext) {
     this.viewport = viewport
     this.backLayer.addChild(this.sky, this.underwater)
-    this.frontLayer.addChild(this.depthBands, this.farWaves, this.nearWaves, this.rain, this.flash)
+    this.frontLayer.addChild(
+      this.depthBands,
+      this.crestFoam,
+      this.farWaves,
+      this.nearWaves,
+      this.rain,
+      this.flash,
+    )
     // The legacy `container` keeps both groups together for any caller
     // that still wants one drop-in node.
     this.container.addChild(this.backLayer, this.frontLayer)
@@ -73,16 +88,64 @@ export class Ocean {
     this.depthMood = Math.max(0, Math.min(1, t))
   }
 
+  setWorldScroll(px: number): void {
+    this.scrollPx = Math.max(0, px)
+  }
+
+  /** Visual punch when the hull rides over a broken wave crest. */
+  triggerWaveBreak(strength = 1): void {
+    this.waveBreakSurge = Math.max(this.waveBreakSurge, strength)
+  }
+
+  /** White foam at the hull when it rides over a wave crest. */
+  triggerCrestBurst(worldX: number): void {
+    this.crestBurstX = worldX
+    this.crestBurstT = 1
+  }
+
+  /**
+   * Near-surface wave height at world-x (for boat wave-riding).
+   */
+  sampleWaveSurfaceY(
+    x: number,
+    weather: WeatherSnapshot,
+    elapsedMs: number,
+    beatPulse = 0,
+  ): number {
+    const { waterLineY } = this.viewport
+    const surge = this.waveBreakSurge
+    const amplitude =
+      (3 + weather.intensity * 14) * (1 + beatPulse * 0.45 + surge * 0.85)
+    const time = elapsedMs * 0.001
+    const yBase = waterLineY + 4
+    const phase = (x + this.scrollPx * 0.28 + this.waveOffset) * 0.018 + time * 1.7
+    return (
+      yBase +
+      Math.sin(phase) * amplitude +
+      Math.sin(phase * 2.3 + 1.7) * amplitude * 0.35
+    )
+  }
+
+  /** Low-frequency wave height for hull bob — avoids beat-synced jitter. */
+  sampleHullWaveY(x: number, weather: WeatherSnapshot, elapsedMs: number): number {
+    const { waterLineY } = this.viewport
+    const amplitude = 2 + weather.intensity * 4.5
+    const time = elapsedMs * 0.001
+    const phase = (x + this.scrollPx * 0.18 + this.waveOffset) * 0.011 + time * 0.65
+    return waterLineY + 4 + Math.sin(phase) * amplitude
+  }
+
   update(
     dtSeconds: number,
     weather: WeatherSnapshot,
     elapsedMs: number,
     beatPulse = 0,
     timeOfDay?: TimeOfDaySnapshot,
+    sailMul = 1,
   ): void {
-    // Waves drift left at a baseline current plus wind push
-    const driftSpeed = 40 + weather.windPush * 0.8
-    this.waveOffset = (this.waveOffset + driftSpeed * dtSeconds) % 200
+    // Waves drift left — faster while the boat is underway.
+    const driftSpeed = (40 + weather.windPush * 0.7) * sailMul
+    this.waveOffset = (this.waveOffset + driftSpeed * dtSeconds) % 400
     this.rainOffset = (this.rainOffset + 600 * dtSeconds) % 60
 
     // nightPhase: 0 noon → 1 midnight. Defaults to "day" if no time
@@ -98,7 +161,10 @@ export class Ocean {
     this.drawSky(weather, nightPhase, Math.max(0, Math.min(1, sunsetGlow)))
     this.drawUnderwater(nightPhase)
     this.drawDepthBands()
+    this.waveBreakSurge = Math.max(0, this.waveBreakSurge - dtSeconds * 2.8)
+    if (this.crestBurstT > 0) this.crestBurstT = Math.max(0, this.crestBurstT - dtSeconds * 2.4)
     this.drawWaves(weather, elapsedMs, beatPulse, nightPhase)
+    this.drawCrestFoam(weather, elapsedMs, beatPulse)
     this.drawRain(weather)
     this.tickLightning(dtSeconds, weather)
   }
@@ -145,26 +211,55 @@ export class Ocean {
   }
 
   private drawUnderwater(nightPhase: number): void {
-    const { width, height, waterLineY } = this.viewport
+    const { width, waterLineY, maxDepth } = this.viewport
     const g = this.underwater
     g.clear()
-    const strips = 18
-    // Even underwater dims at night — the surface lets in less light.
     let top = colorMix(0x2f78a9, 0x0c1c3d, nightPhase)
     let bot = colorMix(0x051628, 0x010512, nightPhase)
-    // Abyss descent: crush both ends toward a cold near-black so deeper
-    // stages read as oppressive, lightless water.
-    if (this.depthMood > 0) {
-      top = colorMix(top, 0x041220, this.depthMood * 0.85)
-      bot = colorMix(bot, 0x00030a, this.depthMood * 0.9)
+    const shallow = Math.max(0, 1 - this.depthMood / 0.5)
+    if (shallow > 0) {
+      top = colorMix(top, 0x5ed4f0, shallow * 0.8)
+      bot = colorMix(bot, 0x2a8aaa, shallow * 0.45)
     }
-    for (let i = 0; i < strips; i += 1) {
-      const t = i / (strips - 1)
+    if (this.depthMood > 0.35) {
+      const deep = (this.depthMood - 0.35) / 0.65
+      top = colorMix(top, 0x041220, deep * 0.85)
+      bot = colorMix(bot, 0x00030a, deep * 0.9)
+    }
+
+    const segments = 40
+    for (let s = 0; s < segments; s += 1) {
+      const x0 = (s / segments) * width
+      const x1 = ((s + 1) / segments) * width
+      const bed0 = seabedY(x0, width, waterLineY, maxDepth, this.depthMood, this.scrollPx)
+      const bed1 = seabedY(x1, width, waterLineY, maxDepth, this.depthMood, this.scrollPx)
+      const midY = (bed0 + bed1) * 0.5
+      const t = Math.max(0, Math.min(1, (midY - waterLineY) / Math.max(1, maxDepth)))
       const color = colorMix(top, bot, t)
-      const stripH = (height - waterLineY) / strips + 1
-      g.rect(0, waterLineY + (i * (height - waterLineY)) / strips, width, stripH)
+      g.moveTo(x0, waterLineY)
+      g.lineTo(x1, waterLineY)
+      g.lineTo(x1, bed1)
+      g.lineTo(x0, bed0)
+      g.closePath()
       g.fill(color)
     }
+  }
+
+  private drawCrestFoam(
+    weather: WeatherSnapshot,
+    elapsedMs: number,
+    beatPulse: number,
+  ): void {
+    const g = this.crestFoam
+    g.clear()
+    if (this.crestBurstT <= 0) return
+    const y = this.sampleWaveSurfaceY(this.crestBurstX, weather, elapsedMs, beatPulse)
+    const t = this.crestBurstT
+    const r = 18 + (1 - t) * 36
+    g.ellipse(this.crestBurstX, y, r, r * 0.35)
+    g.fill({ color: 0xffffff, alpha: t * 0.75 })
+    g.ellipse(this.crestBurstX, y - 2, r * 0.6, r * 0.2)
+    g.fill({ color: 0xeaf6ff, alpha: t * 0.55 })
   }
 
   private drawDepthBands(): void {
@@ -188,7 +283,9 @@ export class Ocean {
   ): void {
     const { width, waterLineY } = this.viewport
     // Beat-synced amplitude bump — the sea breathes with the soundtrack.
-    const amplitude = (3 + weather.intensity * 14) * (1 + beatPulse * 0.45)
+    const surge = this.waveBreakSurge
+    const amplitude =
+      (3 + weather.intensity * 14) * (1 + beatPulse * 0.45 + surge * 0.85)
     const time = elapsedMs * 0.001
     // Waves shift toward deep cobalt/navy at night so the surface
     // reads as moonlit black water rather than washed-out daylight.

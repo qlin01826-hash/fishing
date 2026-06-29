@@ -53,6 +53,8 @@ export class Boat {
   private readonly mast = new Graphics()
   private readonly rod = new Graphics()
   private readonly face = new Graphics()
+  /** Water wash over the hull when stuck inside a wave crest. */
+  private readonly waveWash = new Graphics()
   /** Lantern hanging off the mast, only visible at night. */
   private readonly lantern = new Graphics()
   /** Soft warm halo cast by the lantern. Drawn BEHIND the hull so it
@@ -78,6 +80,24 @@ export class Boat {
   /** Beat-driven flame flicker amount (0..1, lerps each frame). */
   private flameFlicker = 0
 
+  /**
+   * Lateral course error from mistimed wave-breaking (0 = on course,
+   * 1 = about to capsize). Drives hull offset + extra roll.
+   */
+  private deviation = 0
+  /** Short pulse when the player breaks a wave on-beat (0..1). */
+  private waveSurge = 0
+  /** Which way the boat is drifting when off-rhythm (-1 or +1). */
+  private deviationDir = 1
+  /** True while the boat is underway between fishing spots. */
+  private sailing = false
+  /** 0 = riding the crest, 1 = hull submerged in the wave trough. */
+  private waveSubmerge = 0
+  private waveSurfaceY = 0
+  private smoothedWaveY = 0
+  private waterLineY = 0
+  private waveSmoothReady = false
+
   constructor() {
     // lanternHalo first so it sits BEHIND the hull, then the boat
     // sprites, then the lantern body on top so the flame is in front
@@ -90,6 +110,7 @@ export class Boat {
       this.cabin,
       this.mast,
       this.rod,
+      this.waveWash,
       this.lantern,
     )
     this.wakeContainer.addChild(this.wakeGraphics)
@@ -105,6 +126,11 @@ export class Boat {
     this.draw()
   }
 
+  /** Move the hull horizontally without rebuilding sprites (cruise drift). */
+  setAnchorX(x: number): void {
+    this.baseX = x
+  }
+
   /**
    * Latch how dark it is (0 = daylight, 1 = midnight). The lantern
    * fades in/out smoothly based on this — pumped by FishingScene from
@@ -112,6 +138,74 @@ export class Boat {
    */
   setNightStrength(target: number): void {
     this.nightTarget = Math.max(0, Math.min(1, target))
+  }
+
+  /** Normalised course error 0..1 — at 1 the penguin is thrown overboard. */
+  getDeviation(): number {
+    return this.deviation
+  }
+
+  resetDeviation(): void {
+    this.deviation = 0
+    this.deviationDir = 1
+    this.waveSurge = 0
+    this.waveSubmerge = 0
+  }
+
+  /** Forward cruise — extra wake and a slight bow-up pitch while sailing. */
+  setSailing(active: boolean): void {
+    this.sailing = active
+  }
+
+  /** How deep the hull is buried in a wave (0..1). */
+  getWaveSubmerge(): number {
+    return this.waveSubmerge
+  }
+
+  /**
+   * Feed rhythm judgements from the wave-breaking panel. Perfect/good
+   * lifts the hull over the crest; misses leave the boat stuck in the wave.
+   */
+  applyRhythmJudgement(
+    judgement: 'perfect' | 'good' | 'miss',
+    beatPhase = 0,
+  ): void {
+    if (judgement === 'perfect') {
+      this.deviation = Math.max(0, this.deviation - 0.14)
+      this.waveSurge = 1
+      this.waveSubmerge = Math.max(0, this.waveSubmerge - 0.45)
+    } else if (judgement === 'good') {
+      this.deviation = Math.max(0, this.deviation - 0.07)
+      this.waveSurge = 0.65
+      this.waveSubmerge = Math.max(0, this.waveSubmerge - 0.28)
+    } else {
+      const early = beatPhase > 0.5
+      this.deviationDir = early ? -1 : 1
+      this.deviation = Math.min(1, this.deviation + 0.2)
+      this.waveSurge = 0
+      const off = Math.min(1, Math.abs(beatPhase - (early ? 0.85 : 0.15)) * 2.2)
+      this.waveSubmerge = Math.min(1, this.waveSubmerge + 0.22 + off * 0.35)
+    }
+  }
+
+  /** Stable hull x for wave sampling (avoids bob ↔ wave feedback loops). */
+  getHullX(): number {
+    return this.baseX
+  }
+
+  /** Sampled wave height at the hull — set each frame by the scene. */
+  setWaveContext(waveSurfaceY: number, waterLineY: number): void {
+    this.waveSurfaceY = waveSurfaceY
+    this.waterLineY = waterLineY
+    if (!this.waveSmoothReady) {
+      this.smoothedWaveY = waveSurfaceY
+      this.waveSmoothReady = true
+    }
+  }
+
+  /** Current wave-surge pulse for the ocean renderer (0..1). */
+  getWaveSurge(): number {
+    return this.waveSurge
   }
 
   /**
@@ -126,33 +220,53 @@ export class Boat {
     viewport: ViewportContext,
     beatPulse = 0,
   ): void {
-    this.bobPhase += dtSeconds * (1.4 + weather.intensity * 1.2)
-    const amplitude = 4 + weather.intensity * 12
-    const lift = Math.sin(this.bobPhase) * amplitude
-    const tilt = Math.cos(this.bobPhase * 1.1 + 0.3) * (0.04 + weather.intensity * 0.16)
-    this.container.position.set(this.baseX, this.baseY + lift)
+    this.smoothedWaveY += (this.waveSurfaceY - this.smoothedWaveY) * Math.min(1, dtSeconds * 2.8)
+
+    this.bobPhase += dtSeconds * (0.7 + weather.intensity * 0.4)
+    const amplitude = 2.5 + weather.intensity * 5
+    const surgeLift = this.waveSurge * 14
+    const ridingWave = this.waveSurge > 0.06 || this.waveSubmerge > 0.1
+    const crestRide = ridingWave
+      ? Math.max(0, this.smoothedWaveY - this.waterLineY) * (1 - this.waveSubmerge * 0.7) * 0.28
+      : 0
+    const sink = this.waveSubmerge * (16 + weather.intensity * 10)
+    const lift = Math.sin(this.bobPhase) * amplitude - surgeLift + crestRide - sink
+    const tilt =
+      Math.cos(this.bobPhase * 0.85) * (0.022 + weather.intensity * 0.06) +
+      this.deviationDir * this.deviation * 0.22 -
+      (this.sailing ? 0.03 : 0)
+    const lateral = this.deviationDir * this.deviation * 42
+    const bx = this.baseX + lateral
+    const by = this.baseY + lift
+    this.container.position.set(bx, by)
     this.container.rotation = tilt
+    this.deviation = Math.max(0, this.deviation - dtSeconds * 0.035)
+    this.waveSurge = Math.max(0, this.waveSurge - dtSeconds * 3.2)
+    if (this.waveSubmerge > 0 && this.waveSurge < 0.05) {
+      this.waveSubmerge = Math.max(0, this.waveSubmerge - dtSeconds * 0.06)
+    }
+    this.drawWaveWash()
     // Rod tip is the rightmost end of the rod in local space, rotated and translated.
     const rodLocalX = 84
     const rodLocalY = -58
     const cos = Math.cos(tilt)
     const sin = Math.sin(tilt)
-    this.rodTipX = this.baseX + rodLocalX * cos - rodLocalY * sin
-    this.rodTipY = this.baseY + lift + rodLocalX * sin + rodLocalY * cos
+    this.rodTipX = bx + rodLocalX * cos - rodLocalY * sin
+    this.rodTipY = by + rodLocalX * sin + rodLocalY * cos
     // Deck-top anchor for the penguin: parked LEFT of the mast (which
     // sits at local x≈-30) so the penguin doesn't visually impale the
     // mast pole. Local deck top is at y=-8.
     const deckLocalX = -54
     const deckLocalY = -8
-    this.deckCenterX = this.baseX + deckLocalX * cos - deckLocalY * sin
-    this.deckTopY = this.baseY + lift + deckLocalX * sin + deckLocalY * cos
+    this.deckCenterX = bx + deckLocalX * cos - deckLocalY * sin
+    this.deckTopY = by + deckLocalX * sin + deckLocalY * cos
 
     // ---- Wake foam ----
     // Pass through the live `lift` so newly-spawned particles emerge at
     // the boat's CURRENT bobbing height — the trail then naturally
     // ripples in a sine wave behind the hull instead of sitting on a
     // flat waterline that disagrees with the rocking boat.
-    this.updateWake(dtSeconds, weather, beatPulse, viewport, lift)
+    this.updateWake(dtSeconds, weather, beatPulse, viewport, lift, bx)
 
     // ---- Lantern lifecycle ----
     this.night += (this.nightTarget - this.night) * Math.min(1, dtSeconds * 1.5)
@@ -164,6 +278,17 @@ export class Boat {
     this.flameFlicker = Math.max(0, this.flameFlicker - dtSeconds * 4)
     this.prevBeatPulse = beatPulse
     this.drawLantern(elapsedMs)
+  }
+
+  private drawWaveWash(): void {
+    const g = this.waveWash
+    g.clear()
+    if (this.waveSubmerge < 0.08) return
+    const t = this.waveSubmerge
+    g.roundRect(-88, -6, 176, 28 + t * 18, 6)
+    g.fill({ color: 0x4a9fd4, alpha: t * 0.55 })
+    g.ellipse(0, 8 + t * 10, 90, 6 + t * 8)
+    g.fill({ color: 0xffffff, alpha: t * 0.35 })
   }
 
   private draw(): void {
@@ -190,17 +315,18 @@ export class Boat {
     beatPulse: number,
     viewport: ViewportContext,
     boatLift: number,
+    sternBaseX: number,
   ): void {
     // Spawn point: just behind the hull's left edge, riding the boat's
     // current bobbed height. `boatLift` is the live vertical offset
     // from `baseY` — adding it here means peaks of the bob produce
     // higher foam pads and troughs produce lower ones, so the trail
     // visibly inherits the boat's wave-bob over time.
-    const sternX = this.baseX - 80
+    const sternX = sternBaseX - 80
     const sternY = this.baseY + boatLift + 4
 
     // Steady emission. Rate climbs gently with weather + faster on beat.
-    const steady = 18 + weather.intensity * 24 + beatPulse * 28
+    const steady = 18 + weather.intensity * 24 + beatPulse * 28 + (this.sailing ? 22 : 0)
     this.wakeSpawnAccum += steady * dtSeconds
     while (this.wakeSpawnAccum > 1) {
       this.wakeSpawnAccum -= 1

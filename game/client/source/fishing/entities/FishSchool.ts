@@ -1,6 +1,7 @@
 import { Container, Graphics } from 'pixi.js'
 import type { FishBodyShape, FishDef, FishSize, ViewportContext } from '../types'
-import { FISH_CATALOG } from '../data/FishCatalog'
+import { FISH_CATALOG, fishEligibleForZone } from '../data/FishCatalog'
+import { seabedY } from '../utils/depthTerrain'
 
 /**
  * Physical scale table by size class. Tuned so the difference between
@@ -81,6 +82,16 @@ export class FishSchool {
   private beatPhase = 0.5
   /** Cached previous-frame beatPhase for downbeat-edge detection. */
   private prevBeatPhase = 0.5
+  /** Run depth 0..1 — fish fade into dark silhouettes in the abyss. */
+  private depthMood = 0
+  private scrollPx = 0
+  /** Lure phase: fish gather and sway around the hook (0..1). */
+  private lureGather = 0
+  private lureHookX = 0
+  private lureHookY = 0
+  private lureActive = false
+  private lureDanceDir: 1 | -1 = 1
+  private stageZone = 0
   /**
    * Active surface-splash particles. Lightweight pool — each splash is
    * a single ring + a handful of droplets. We never expect more than
@@ -119,6 +130,49 @@ export class FishSchool {
   /** BeatClock-driven phase (0..1) — drives tail wag during frenzy. */
   setBeatPhase(phase: number): void {
     this.beatPhase = phase
+  }
+
+  setDepthMood(t: number): void {
+    this.depthMood = Math.max(0, Math.min(1, t))
+  }
+
+  setWorldScroll(px: number): void {
+    this.scrollPx = Math.max(0, px)
+  }
+
+  setStageZone(zone: number): void {
+    this.stageZone = Math.max(0, Math.min(4, zone))
+  }
+
+  /** Drive fish to cluster and dance around the hook during lure. */
+  setLureGather(
+    amount: number,
+    hookX: number,
+    hookY: number,
+    active: boolean,
+    danceDir: 1 | -1 = 1,
+  ): void {
+    this.lureGather = Math.max(0, Math.min(1, amount))
+    this.lureHookX = hookX
+    this.lureHookY = hookY
+    this.lureActive = active
+    this.lureDanceDir = danceDir
+  }
+
+  /** Spawn extra fish near the hook as lure progress climbs. */
+  spawnLureFish(hookX: number, hookY: number, def: FishDef, count = 1): void {
+    for (let i = 0; i < count; i += 1) {
+      const angle = (i / Math.max(1, count)) * Math.PI * 2 + Math.random() * 0.6
+      const dist = 40 + Math.random() * 50
+      const x = hookX + Math.cos(angle) * dist
+      let y = hookY + Math.sin(angle) * dist * 0.35
+      y = this.clampFishAboveSeabed(x, y)
+      const fish = this.makeFish(def, x, y)
+      fish.vx = 0
+      fish.homeY = y
+      this.container.addChild(fish.graphic)
+      this.fish.push(fish)
+    }
   }
 
   /**
@@ -228,13 +282,26 @@ export class FishSchool {
     // per-fish phase offset). 2π per beat → fish sway left-then-right
     // once per beat, so the school visibly "salsa"s with the music.
     const beatSwing = Math.sin(this.beatPhase * Math.PI * 2)
+    const lureRadius = 50 + this.lureGather * 120
     for (let i = this.fish.length - 1; i >= 0; i -= 1) {
       const f = this.fish[i]
-      const wagSpeed = 4 + this.frenzyT * 10
+      const wagSpeed = 4 + this.frenzyT * 10 + this.lureGather * 6
       f.phase += dtSeconds * wagSpeed
-      // Faster while frenzy — fish dart excitedly toward the boat.
       const horiz = f.vx * (1 + this.frenzyT * 0.6)
       f.x += horiz * dtSeconds
+
+      if (this.lureActive && this.lureGather > 0.05) {
+        const dx = this.lureHookX - f.x
+        const dy = this.lureHookY - f.y
+        const dist = Math.hypot(dx, dy)
+        const pull = Math.min(1, this.lureGather * (dist < lureRadius * 2 ? 1.2 : 0.35))
+        f.x += dx * pull * dtSeconds * (2.2 + this.lureGather * 2)
+        f.y += dy * pull * dtSeconds * 1.6
+        f.homeY += (this.lureHookY - f.homeY) * pull * dtSeconds * 0.8
+        if (dist < lureRadius * 1.4) {
+          f.vx *= 0.92
+        }
+      }
 
       // ---- Frenzy choreography depends on the fish's size class ----
       //
@@ -267,6 +334,7 @@ export class FishSchool {
       const beatWag = Math.sin((this.beatPhase + f.phase * 0.05) * Math.PI * 2)
       const idleBob = Math.sin(f.phase) * 0.4
       f.y += (idleBob + beatWag * 1.2 * this.frenzyT) * dtSeconds * 60 * 0.06
+      f.y = this.clampFishAboveSeabed(f.x, f.y)
 
       const offscreenLeft = horiz < 0 && f.x < -40
       const offscreenRight = horiz > 0 && f.x > this.viewport.width + 40
@@ -282,7 +350,9 @@ export class FishSchool {
       // a per-fish phase offset (danceOffset) so the school moves
       // poly-rhythmically, not in lockstep.
       const swayX =
-        Math.sin(this.beatPhase * Math.PI * 2 + f.danceOffset) * 14 * this.frenzyT
+        Math.sin(this.beatPhase * Math.PI * 2 + f.danceOffset) *
+        (14 * this.frenzyT + 22 * this.lureGather) *
+        this.lureDanceDir
 
       // ---- Pose computation per fish size ----
       const atSurface = Math.abs(f.y - surfaceLine) < 30
@@ -340,6 +410,15 @@ export class FishSchool {
         horizTilt * (1 - standingT) +
         (standingRot + standingTilt) * standingT +
         bigFishTilt
+
+      // Depth murk: shallow stages show crisp colour; deep stages
+      // collapse fish into dark, low-contrast shadows.
+      const { waterLineY, maxDepth } = this.viewport
+      const fishDepth = Math.max(0, (f.y - waterLineY) / Math.max(1, maxDepth - 40))
+      const murk = Math.min(1, this.depthMood * 0.85 + fishDepth * 0.35)
+      f.graphic.alpha = 0.95 - murk * 0.55
+      const tint = colorMixRgb(0xffffff, 0x0a1420, murk)
+      f.graphic.tint = tint
     }
 
     this.updateSplashes(dtSeconds, surfaceLine)
@@ -490,23 +569,32 @@ export class FishSchool {
 
   private spawn(hungerIntensity: number): void {
     const { waterLineY, maxDepth, width } = this.viewport
-    const depthBand = Math.random()
-    // Hunger nudges spawns deeper (where rarer fish live)
-    const biasedDepth = Math.min(1, depthBand + hungerIntensity * 0.3 * Math.random())
-    const candidates = FISH_CATALOG.filter(
-      (def) => biasedDepth >= def.minDepth && biasedDepth <= def.maxDepth,
-    )
-    const def = candidates.length > 0
-      ? candidates[Math.floor(Math.random() * candidates.length)]
-      : FISH_CATALOG[0]
+    let depthBand = Math.random()
+    depthBand = Math.min(1, depthBand + hungerIntensity * 0.25 * Math.random())
+    const candidates = fishEligibleForZone(this.stageZone, depthBand)
+    const def =
+      candidates.length > 0
+        ? candidates[Math.floor(Math.random() * candidates.length)]
+        : FISH_CATALOG[0]
     const fromLeft = Math.random() < 0.5
     const x = fromLeft ? -30 : width + 30
-    const y = waterLineY + 30 + biasedDepth * (maxDepth - 46)
+    let y = waterLineY + 30 + depthBand * (maxDepth - 46)
+    y = this.clampFishAboveSeabed(x, y)
     const fish = this.makeFish(def, x, y)
     fish.vx = (fromLeft ? 1 : -1) * (18 + Math.random() * 30)
     fish.homeY = y
     this.container.addChild(fish.graphic)
     this.fish.push(fish)
+  }
+
+  /** Keep fish in the water column above the sloping sand — never on the beach. */
+  private clampFishAboveSeabed(x: number, y: number): number {
+    const { width, waterLineY, maxDepth } = this.viewport
+    const bed = seabedY(x, width, waterLineY, maxDepth, this.depthMood, this.scrollPx)
+    const minY = waterLineY + 16
+    const maxY = Math.min(waterLineY + maxDepth - 14, bed - 20)
+    if (maxY < minY + 8) return minY
+    return Math.max(minY, Math.min(maxY, y))
   }
 
   private makeFish(def: FishDef, x: number, y: number): AmbientFish {
@@ -592,6 +680,19 @@ function weightedPick<T>(items: readonly T[], weight: (item: T) => number): T {
 // ============================================================================
 // drawFishByShape helpers
 // ============================================================================
+
+function colorMixRgb(a: number, b: number, t: number): number {
+  const ar = (a >> 16) & 0xff
+  const ag = (a >> 8) & 0xff
+  const ab = a & 0xff
+  const br = (b >> 16) & 0xff
+  const bg = (b >> 8) & 0xff
+  const bb = b & 0xff
+  const r = Math.round(ar + (br - ar) * t)
+  const g = Math.round(ag + (bg - ag) * t)
+  const bl = Math.round(ab + (bb - ab) * t)
+  return (r << 16) | (g << 8) | bl
+}
 
 /**
  * The classic sardine/mackerel shape — a thin streamlined oval with a

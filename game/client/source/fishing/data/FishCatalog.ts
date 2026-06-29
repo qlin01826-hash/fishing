@@ -190,6 +190,26 @@ const RARITY_BASE_WEIGHTS: Record<FishDef['rarity'], number> = {
   legendary: 1,
 }
 
+/** Shallowest depth band (0..1) each named zone allows for ambient spawns. */
+const ZONE_MIN_SPAWN_DEPTH = [0, 0.08, 0.22, 0.42, 0.62] as const
+/** Deepest depth band each zone exposes — beach shallows stay very thin. */
+const ZONE_MAX_SPAWN_DEPTH = [0.32, 0.52, 0.72, 0.9, 1.0] as const
+
+/** Fish species eligible for the current zone and water-column slice. */
+export function fishEligibleForZone(zone: number, depth01: number): FishDef[] {
+  const z = Math.max(0, Math.min(ZONE_MAX_SPAWN_DEPTH.length - 1, zone))
+  const bandMin = ZONE_MIN_SPAWN_DEPTH[z]
+  const bandMax = ZONE_MAX_SPAWN_DEPTH[z]
+  if (depth01 < bandMin || depth01 > bandMax) return []
+  return FISH_CATALOG.filter(
+    (fish) =>
+      depth01 >= fish.minDepth &&
+      depth01 <= fish.maxDepth &&
+      fish.minDepth <= bandMax &&
+      fish.maxDepth >= bandMin,
+  )
+}
+
 /**
  * Choose a fish to bite. Higher weather intensity (= angrier penguin)
  * shifts the distribution toward rare species.
@@ -199,15 +219,15 @@ export function pickFishForBite(
   depth01: number,
   rng: () => number,
   extraRareBoost = 0,
+  zone = 0,
 ): FishDef {
-  const eligible = FISH_CATALOG.filter(
-    (fish) => depth01 >= fish.minDepth && depth01 <= fish.maxDepth,
-  )
-  const pool = eligible.length > 0 ? eligible : [...FISH_CATALOG]
+  const eligible = fishEligibleForZone(zone, depth01)
+  const pool = eligible.length > 0 ? eligible : fishEligibleForZone(zone, Math.min(0.25, depth01))
+  const fallback = pool.length > 0 ? pool : [...FISH_CATALOG]
   // Stage adds on top of the weather's rare bias so deeper runs throw
   // rarer (and thus tougher) species at the player.
   const boost = Math.min(1.5, weather.rareBoost + Math.max(0, extraRareBoost))
-  const weights = pool.map((fish) => {
+  const weights = fallback.map((fish) => {
     const base = RARITY_BASE_WEIGHTS[fish.rarity]
     switch (fish.rarity) {
       case 'common':
@@ -224,17 +244,21 @@ export function pickFishForBite(
   })
   const total = weights.reduce((sum, value) => sum + value, 0)
   let roll = rng() * total
-  for (let index = 0; index < pool.length; index += 1) {
+  for (let index = 0; index < fallback.length; index += 1) {
     roll -= weights[index]
-    if (roll <= 0) return pool[index]
+    if (roll <= 0) return fallback[index]
   }
-  return pool[pool.length - 1]
+  return fallback[fallback.length - 1] ?? FISH_CATALOG[0]
 }
 
-/** Pick what the penguin asks for: bias toward rarer fish when hungry. */
-export function pickCommissionFish(hunger: number, rng: () => number): FishDef {
+/** Pick what the penguin asks for — biased by hunger and current zone. */
+export function pickCommissionFish(hunger: number, rng: () => number, zone = 0): FishDef {
   const desire = Math.min(1, Math.max(0, hunger))
-  const weights = FISH_CATALOG.map((fish) => {
+  const z = Math.max(0, Math.min(ZONE_MAX_SPAWN_DEPTH.length - 1, zone))
+  const bandMax = ZONE_MAX_SPAWN_DEPTH[z]
+  const zoneFish = FISH_CATALOG.filter((f) => f.minDepth <= bandMax && f.maxDepth >= ZONE_MIN_SPAWN_DEPTH[z])
+  const catalog = zoneFish.length > 0 ? zoneFish : [...FISH_CATALOG]
+  const weights = catalog.map((fish) => {
     const base = RARITY_BASE_WEIGHTS[fish.rarity]
     switch (fish.rarity) {
       case 'common':
@@ -251,11 +275,11 @@ export function pickCommissionFish(hunger: number, rng: () => number): FishDef {
   })
   const total = weights.reduce((sum, value) => sum + value, 0)
   let roll = rng() * total
-  for (let index = 0; index < FISH_CATALOG.length; index += 1) {
+  for (let index = 0; index < catalog.length; index += 1) {
     roll -= weights[index]
-    if (roll <= 0) return FISH_CATALOG[index]
+    if (roll <= 0) return catalog[index]
   }
-  return FISH_CATALOG[0]
+  return catalog[0]
 }
 
 export function rarityToColor(rarity: FishDef['rarity']): number {

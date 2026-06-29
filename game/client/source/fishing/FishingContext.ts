@@ -14,10 +14,13 @@ import type { ReelButtons } from './ui/ReelButtons'
 import type { TensionBar } from './ui/TensionBar'
 import type { WillpowerBar } from './ui/WillpowerBar'
 import type { PullPanel } from './ui/PullPanel'
+import type { LurePads } from './ui/LurePads'
 import type { EventOverlay } from './ui/EventOverlay'
 import type { CatchBanner } from './ui/CatchBanner'
 import type { NoteLane } from './ui/NoteLane'
 import type { FrenzyOverlay } from './ui/FrenzyOverlay'
+import type { BattleChaseView } from './ui/BattleChaseView'
+import type { GameStateController } from './chase/GameStateController'
 import type { HungerSystem } from './systems/HungerSystem'
 import type { WeatherSystem } from './systems/WeatherSystem'
 import type { AudioSystem } from './systems/AudioSystem'
@@ -50,10 +53,14 @@ export interface FishingContext {
   readonly tensionBar: TensionBar
   readonly willpowerBar: WillpowerBar
   readonly pullPanel: PullPanel
+  readonly lurePads: LurePads
   readonly eventOverlay: EventOverlay
   readonly catchBanner: CatchBanner
   readonly noteLane: NoteLane
   readonly frenzyOverlay: FrenzyOverlay
+  readonly battleChaseView: BattleChaseView
+  /** Outer render-mode controller (2D fishing ↔ 3D chase transition). */
+  readonly gameState: GameStateController
   // Systems
   readonly hungerSystem: HungerSystem
   readonly weatherSystem: WeatherSystem

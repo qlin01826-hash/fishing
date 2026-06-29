@@ -20,6 +20,7 @@ import { HorizonLayer } from './entities/HorizonLayer'
 import { ForegroundProps } from './entities/ForegroundProps'
 import { FogLayer } from './entities/FogLayer'
 import { AbyssOverlay } from './entities/AbyssOverlay'
+import { SeafloorLayer } from './entities/SeafloorLayer'
 
 import { Hud } from './ui/Hud'
 import { CastPreview } from './ui/CastPreview'
@@ -27,10 +28,12 @@ import { ReelButtons } from './ui/ReelButtons'
 import { TensionBar } from './ui/TensionBar'
 import { WillpowerBar } from './ui/WillpowerBar'
 import { PullPanel } from './ui/PullPanel'
+import { LurePads } from './ui/LurePads'
 import { EventOverlay } from './ui/EventOverlay'
 import { CatchBanner } from './ui/CatchBanner'
 import { NoteLane } from './ui/NoteLane'
 import { FrenzyOverlay } from './ui/FrenzyOverlay'
+import { BattleChaseView } from './ui/BattleChaseView'
 
 import { HungerSystem } from './systems/HungerSystem'
 import { WeatherSystem } from './systems/WeatherSystem'
@@ -39,8 +42,12 @@ import { ProgressionSystem } from './systems/ProgressionSystem'
 import { AudioSystem } from './systems/AudioSystem'
 import { PointerTracker } from './systems/PointerTracker'
 import { BeatClock } from './systems/BeatClock'
+import { GmController } from './systems/GmController'
+import { GmPanel } from './ui/GmPanel'
 
 import { SailingState } from './states/SailingState'
+import { GameStateController, GameRenderMode } from './chase/GameStateController'
+import { Graphics } from 'pixi.js'
 
 /**
  * Scene root: owns all Pixi containers, all entities/UI/systems, runs
@@ -85,6 +92,7 @@ export class FishingScene implements GameScene {
   private readonly foregroundProps: ForegroundProps
   private readonly fogLayer: FogLayer
   private readonly abyssOverlay: AbyssOverlay
+  private readonly seafloorLayer: SeafloorLayer
 
   // UI
   private readonly hud: Hud
@@ -93,10 +101,14 @@ export class FishingScene implements GameScene {
   private readonly tensionBar: TensionBar
   private readonly willpowerBar: WillpowerBar
   private readonly pullPanel: PullPanel
+  private readonly lurePads: LurePads
   private readonly eventOverlay: EventOverlay
   private readonly catchBanner: CatchBanner
   private readonly noteLane: NoteLane
   private readonly frenzyOverlay: FrenzyOverlay
+  private readonly battleChaseView: BattleChaseView
+  private readonly gameStateController: GameStateController
+  private readonly hookTransitionFlash = new Graphics()
 
   // Systems
   private readonly hungerSystem = new HungerSystem()
@@ -109,6 +121,7 @@ export class FishingScene implements GameScene {
   private readonly pointer = new PointerTracker()
   private readonly beatClock = new BeatClock()
   private readonly events = new EventBus<FishingEvents>()
+  private gmPanel: GmPanel | null = null
 
   // Session state
   private sessionScore = 0
@@ -146,6 +159,7 @@ export class FishingScene implements GameScene {
     this.foregroundProps = new ForegroundProps(this.viewport)
     this.fogLayer = new FogLayer(this.viewport)
     this.abyssOverlay = new AbyssOverlay(this.viewport)
+    this.seafloorLayer = new SeafloorLayer(this.viewport)
 
     this.hud = new Hud()
     this.castPreview = new CastPreview(this.viewport)
@@ -153,10 +167,13 @@ export class FishingScene implements GameScene {
     this.tensionBar = new TensionBar()
     this.willpowerBar = new WillpowerBar()
     this.pullPanel = new PullPanel()
+    this.lurePads = new LurePads()
     this.eventOverlay = new EventOverlay()
     this.catchBanner = new CatchBanner()
     this.noteLane = new NoteLane()
     this.frenzyOverlay = new FrenzyOverlay()
+    this.battleChaseView = new BattleChaseView()
+    this.gameStateController = new GameStateController()
 
     // Wire the BeatClock into the rhythm-dependent layers. The clock
     // itself stays dormant (returning sentinel values) until the audio
@@ -165,6 +182,7 @@ export class FishingScene implements GameScene {
     this.audio.attachBeatClock(this.beatClock)
     this.pullPanel.attachBeatClock(this.beatClock)
     this.noteLane.attachBeatClock(this.beatClock)
+    this.lurePads.attachBeatClock(this.beatClock)
 
     // Cross-system reactions to "a fish was caught" live here (the
     // composition root), not inside CatchState. Adding a new reaction
@@ -200,6 +218,7 @@ export class FishingScene implements GameScene {
 
     // Whale sits BEHIND the fish school so the fish always visibly
     // swim in front of the much bigger silhouette.
+    this.underWaterContainer.addChild(this.seafloorLayer.container)
     this.underWaterContainer.addChild(this.whale.container)
     this.underWaterContainer.addChild(this.fishSchool.container)
     this.underWaterContainer.addChild(this.hook.container)
@@ -232,9 +251,14 @@ export class FishingScene implements GameScene {
     // while the UI/topUi containers above stay perfectly crisp.
     this.aboveWaterContainer.addChild(this.abyssOverlay.container)
 
+    this.rootContainer.addChild(this.battleChaseView.container)
+
+    this.topUiContainer.addChild(this.hookTransitionFlash)
+
     this.uiContainer.addChild(this.castPreview.container)
     this.uiContainer.addChild(this.reelButtons.container)
     this.uiContainer.addChild(this.pullPanel.container)
+    this.uiContainer.addChild(this.lurePads.container)
     // Note lane sits ON TOP of the pull panel so the notes stay visible
     // as they slide across the panel disc; the panel itself already
     // pulses on each beat, so the lane skips its own hit-zone marker.
@@ -279,12 +303,18 @@ export class FishingScene implements GameScene {
     this.tensionBar.container.visible = false
     this.willpowerBar.container.visible = false
     this.pullPanel.container.visible = false
+    this.lurePads.container.visible = false
     this.noteLane.container.visible = false
+    this.battleChaseView.setActive(false)
 
     // Boot the hunger system with offline catch-up so re-opening a tab
     // after a long break greets the player with a starving penguin.
     this.hungerSystem.applyOfflineGrowth()
-    this.weatherSystem.update(this.hungerSystem.getHunger())
+    this.weatherSystem.update(
+      this.hungerSystem.getHunger(),
+      this.progression.voyage,
+      this.progression.stage.zone,
+    )
 
     this.onResize(this.engine.app.renderer.width, this.engine.app.renderer.height)
     this.refreshHud()
@@ -297,14 +327,27 @@ export class FishingScene implements GameScene {
     // Start in sailing — SailingState will roll a commission.
     const ctx = this.buildContext()
     this.stateMachine.transitionTo(new SailingState(ctx))
+
+    if (import.meta.env.DEV) {
+      const gm = new GmController(ctx, () => this.stateMachine.currentId)
+      this.gmPanel = new GmPanel(gm)
+      const host = document.getElementById('game-container')
+      if (host) this.gmPanel.mount(host)
+    }
   }
 
   update(deltaSeconds: number): void {
-    this.elapsedMs += deltaSeconds * 1000
+    this.gameStateController.update(deltaSeconds)
+    const simDt = deltaSeconds * this.gameStateController.timeScale
+    this.elapsedMs += simDt * 1000
 
     // Systems
     this.hungerSystem.update(deltaSeconds, this.elapsedMs)
-    this.weatherSystem.update(this.hungerSystem.getHunger())
+    this.weatherSystem.update(
+      this.hungerSystem.getHunger(),
+      this.progression.voyage,
+      this.progression.stage.zone,
+    )
     this.timeOfDay.update(deltaSeconds)
     const weather = this.weatherSystem.get()
     const tod = this.timeOfDay.get()
@@ -331,56 +374,134 @@ export class FishingScene implements GameScene {
     const beatPhase = this.beatClock.started ? this.beatClock.phase() : 0.5
     const beatPulse = beatPhase < 0.25 ? 1 - beatPhase / 0.25 : 0
 
-    // Abyss descent mood: ease the current depth atmosphere toward the
-    // stage's target so it deepens smoothly between battles instead of
-    // popping on each catch. Drives the ocean palette + edge vignette.
-    const targetMood = this.progression.depthMood
-    this.depthMoodCurrent += (targetMood - this.depthMoodCurrent) * Math.min(1, deltaSeconds * 1.2)
+    const stateId = this.stateMachine.currentId
+    const renderMode = this.gameStateController.getMode()
+    const transT = this.gameStateController.getTransitionProgress()
+    const inChase3D = renderMode === GameRenderMode.DEEP_SEA_CHASE_3D
+    const inTransition = renderMode === GameRenderMode.HOOKED_TRANSITION
+    const dt = inTransition ? simDt : deltaSeconds
+    const show2d =
+      renderMode === GameRenderMode.FISHING_2D || (inTransition && transT < 0.55)
+    const showChase =
+      inChase3D || (inTransition && transT >= 0.3) || stateId === 'battle'
+
+    this.skyContainer.visible = show2d
+    this.underWaterContainer.visible = show2d
+    this.aboveWaterContainer.visible = show2d
+    this.battleChaseView.setActive(showChase && (inChase3D || stateId === 'battle'))
+
+    const flashA = this.gameStateController.getFlashAlpha()
+    this.hookTransitionFlash.clear()
+    if (flashA > 0.01) {
+      this.hookTransitionFlash.rect(0, 0, this.viewport.width, this.viewport.height)
+      this.hookTransitionFlash.fill({ color: 0xe8f8ff, alpha: flashA * 0.85 })
+    }
+    this.hookTransitionFlash.visible = flashA > 0.01
+
+    if (showChase && (inChase3D || stateId === 'battle')) {
+      this.pullPanel.setChaseHudMode(true)
+      if (this.penguin.container.parent !== this.battleChaseView.actorLayer) {
+        this.battleChaseView.actorLayer.addChild(this.penguin.container)
+      }
+      const now = performance.now()
+      this.battleChaseView.update(simDt, now, this.beatClock)
+      this.battleChaseView.setComboCount(this.pullPanel.getComboCount())
+      if (!this.penguin.isPathChasing()) {
+        const pose = this.battleChaseView.getPlayerPose()
+        this.penguin.setChasePose(pose.x, pose.y, pose.bank, pose.scale)
+      }
+    } else {
+      this.pullPanel.setChaseHudMode(false)
+      if (this.battleChaseView.isActive()) {
+        this.battleChaseView.setActive(false)
+      }
+      if (
+        this.penguin.isPathChasing() &&
+        this.penguin.container.parent === this.battleChaseView.actorLayer
+      ) {
+        this.aboveWaterContainer.addChild(this.penguin.container)
+      }
+    }
+
+    const underway =
+      stateId === 'sailing' || stateId === 'sinking' || stateId === 'waiting'
+    this.progression.updateVoyage(simDt, underway, this.viewport.width)
+    const scrollPx = this.progression.scroll
+    const voyageVisual = this.progression.voyage
+    const sailMul = underway ? 1.15 + voyageVisual * 0.85 : 0.35
+
+    // Abyss descent mood: blend stage milestone with live voyage position
+    // so the water darkens gradually while the boat sails between catches.
+    const targetMood = Math.max(this.progression.depthMood, this.progression.getVoyageDepthMood())
+    this.depthMoodCurrent += (targetMood - this.depthMoodCurrent) * Math.min(1, simDt * 1.2)
     this.ocean.setDepthMood(this.depthMoodCurrent)
+    this.ocean.setWorldScroll(scrollPx)
     this.abyssOverlay.setMood(this.depthMoodCurrent)
+    this.horizonLayer.setDepthMood(this.depthMoodCurrent)
+    this.horizonLayer.setWorldScroll(scrollPx)
+    this.fishSchool.setDepthMood(this.depthMoodCurrent)
+    this.fishSchool.setWorldScroll(scrollPx)
+    this.fishSchool.setStageZone(this.progression.stage.zone)
+    this.seafloorLayer.setDepthMood(this.depthMoodCurrent)
+    this.seafloorLayer.setWorldScroll(scrollPx)
+    this.foregroundProps.setWorldScroll(scrollPx)
+
+    // Leave the beach: hull drifts from near-shore (left) toward mid-lane.
+    const depart = Math.min(1, scrollPx / Math.max(1, this.viewport.width * 0.65))
+    const boatX = this.viewport.width * (0.32 + depart * 0.18)
+    this.boat.setAnchorX(boatX)
+    this.seafloorLayer.setTimeOfDay(tod)
+    this.seafloorLayer.update(dt)
     this.abyssOverlay.update()
 
     // Entities
-    this.ocean.update(deltaSeconds, weather, this.elapsedMs, beatPulse, tod)
+    this.ocean.update(dt, weather, this.elapsedMs, beatPulse, tod, sailMul)
     // Distant sky decorations tick on the same weather snapshot so
     // clouds/birds dim during storms and the horizon mountains drift
     // with the wind. Updated BEFORE the foreground entities so any
     // composite reads (e.g. the sun position for moonlight later on)
     // see the freshest values. Aurora + shooting stars need the beat
     // pulse so they shimmer on the downbeat.
-    this.skyLayer.update(deltaSeconds, weather, this.elapsedMs, beatPulse)
-    this.horizonLayer.update(deltaSeconds, weather)
+    this.skyLayer.update(dt, weather, this.elapsedMs, beatPulse)
+    this.horizonLayer.update(dt, weather, sailMul)
     // Foreground reefs/buoys/driftwood scroll past at a faster
     // parallax than the horizon, with beat-synced foam pulses so
     // the "wakes" on each prop punch on the downbeat.
     this.foregroundProps.setBeatPulse(beatPulse)
-    this.foregroundProps.update(deltaSeconds, weather)
+    this.foregroundProps.update(dt, weather, sailMul)
     // Fog reads its inputs via setters above; this tick advances drift.
     this.fogLayer.setBeatPulse(beatPulse)
-    this.fogLayer.update(deltaSeconds)
-    this.boat.update(deltaSeconds, weather, this.elapsedMs, this.viewport, beatPulse)
-    this.penguin.update(deltaSeconds, this.hungerSystem.getHunger(), beatPulse)
+    this.fogLayer.update(dt)
+    const waveAtHull = this.ocean.sampleHullWaveY(
+      this.boat.getHullX(),
+      weather,
+      this.elapsedMs,
+    )
+    this.boat.setWaveContext(waveAtHull, this.viewport.waterLineY)
+    this.boat.setSailing(underway)
+    this.boat.update(dt, weather, this.elapsedMs, this.viewport, beatPulse)
+    this.penguin.setWaveSubmerge(this.boat.getWaveSubmerge())
+    this.penguin.update(dt, this.hungerSystem.getHunger(), beatPulse)
     // Pump the BeatClock phase into the school every frame so the
     // dance / splash logic stays in sync with the audio even after
     // BattleState (which also calls setBeatPhase) has exited.
     this.fishSchool.setBeatPhase(beatPhase)
-    this.fishSchool.update(deltaSeconds, weather.intensity)
-    this.hook.update(deltaSeconds, this.viewport, this.boat.rodTipX, this.boat.rodTipY, weather.windPush)
-    this.mermaidRock.update(deltaSeconds)
+    this.fishSchool.update(dt, weather.intensity)
+    this.hook.update(dt, this.viewport, this.boat.rodTipX, this.boat.rodTipY, weather.windPush)
+    this.mermaidRock.update(dt)
     // Whale needs the beat phase so its spout fires on the downbeat
     // (same edge-detection trick the fish-school splash uses).
-    this.whale.update(deltaSeconds, beatPhase)
+    this.whale.update(dt, beatPhase)
 
-    // Park the penguin on the boat's deck — it visibly rides the wave
-    // bob and its beat-driven bounce stacks on top of the boat's own
-    // motion. `deckCenterX/deckTopY` are world-space anchors Boat.update
-    // refreshes each frame. -44 places the penguin's feet on the deck
-    // planks at rest; the body lifts ~4px on every beat, so the
-    // penguin briefly leaves the planks → lands → squash on the kick.
-    this.penguin.setPosition(this.boat.deckCenterX, this.boat.deckTopY - 44)
+    // Park the penguin on the boat's deck — skipped during overboard
+    // failure or swim cameos where the penguin owns its own position.
+    if (this.penguin.isAnchoredToBoat()) {
+      this.penguin.setPosition(this.boat.deckCenterX, this.boat.deckTopY - 44)
+    }
 
     // UI
     this.reelButtons.update(deltaSeconds)
+    this.lurePads.update(deltaSeconds, performance.now())
     this.eventOverlay.update(deltaSeconds)
     this.catchBanner.update(deltaSeconds)
     this.noteLane.update(deltaSeconds, performance.now())
@@ -394,9 +515,9 @@ export class FishingScene implements GameScene {
     }
     this.refreshHud()
 
-    this.stateMachine.update(deltaSeconds, this.elapsedMs)
+    this.stateMachine.update(dt, this.elapsedMs)
 
-    this.tickShake(deltaSeconds)
+    this.tickShake(dt)
   }
 
   /** Trigger a brief screen-shake. Replaces any in-flight shake. */
@@ -445,7 +566,8 @@ export class FishingScene implements GameScene {
     this.foregroundProps.setViewport(this.viewport)
     this.fogLayer.setViewport(this.viewport)
     this.abyssOverlay.setViewport(this.viewport)
-    this.boat.setBase(width / 2, waterLineY - 8)
+    this.seafloorLayer.setViewport(this.viewport)
+    this.boat.setBase(width * 0.32, waterLineY - 8)
     this.mermaidRock.setLayout(width, waterLineY)
     this.hud.setLayout(width, height)
 
@@ -472,6 +594,7 @@ export class FishingScene implements GameScene {
     const pullCx = pullRadius + 20
     const pullCy = height - pullRadius - 20
     this.pullPanel.setPosition(pullCx, pullCy, pullRadius)
+    this.lurePads.setLayout(width, height)
     // Note lane: anchored to the pull-panel centre and extending right.
     // Length scales with viewport so wider screens get more look-ahead
     // visible at once. Reserve room for the willpower bar on the right.
@@ -490,9 +613,12 @@ export class FishingScene implements GameScene {
     // Frenzy overlay tracks the full viewport — its vignette wraps
     // every edge and the banner anchors near the top.
     this.frenzyOverlay.setLayout(width, height)
+    this.battleChaseView.setLayout(width, height)
   }
 
   destroy(): void {
+    this.gmPanel?.destroy()
+    this.gmPanel = null
     const canvas = this.engine.app.canvas
     canvas.removeEventListener('pointerdown', this.onCanvasPointerDown)
     canvas.removeEventListener('pointermove', this.onCanvasPointerMove)
@@ -522,6 +648,9 @@ export class FishingScene implements GameScene {
     this.audio.startGrooveBed()
     this.engine.app.canvas.setPointerCapture?.(e.pointerId)
     const { x, y } = this.toCanvas(e)
+    if (this.stateMachine.currentId === 'battle') {
+      this.battleChaseView.aimAtScreenX(x)
+    }
     this.stateMachine.pointerDown(x, y, e.pointerId)
   }
 
@@ -548,6 +677,22 @@ export class FishingScene implements GameScene {
    * our game.
    */
   private handleKeyDown(e: KeyboardEvent): void {
+    if (this.lurePads.container.visible) {
+      const lureKey =
+        e.code === 'KeyA' ||
+        e.code === 'KeyD' ||
+        e.code === 'KeyW' ||
+        e.code === 'KeyS' ||
+        e.code === 'ArrowLeft' ||
+        e.code === 'ArrowRight'
+      if (lureKey) {
+        e.preventDefault()
+        this.audio.unlock()
+        this.lurePads.keyboardEvent(true, e.code)
+        return
+      }
+    }
+
     if (!this.isSpaceKey(e)) return
     e.preventDefault()
     if (e.repeat) {
@@ -563,6 +708,21 @@ export class FishingScene implements GameScene {
   }
 
   private handleKeyUp(e: KeyboardEvent): void {
+    if (this.lurePads.container.visible) {
+      const lureKey =
+        e.code === 'KeyA' ||
+        e.code === 'KeyD' ||
+        e.code === 'KeyW' ||
+        e.code === 'KeyS' ||
+        e.code === 'ArrowLeft' ||
+        e.code === 'ArrowRight'
+      if (lureKey) {
+        e.preventDefault()
+        this.lurePads.keyboardEvent(false, e.code)
+        return
+      }
+    }
+
     if (!this.isSpaceKey(e)) return
     e.preventDefault()
     // Always release — if battle ended while Space was held, the panel
@@ -600,10 +760,13 @@ export class FishingScene implements GameScene {
       tensionBar: this.tensionBar,
       willpowerBar: this.willpowerBar,
       pullPanel: this.pullPanel,
+      lurePads: this.lurePads,
       eventOverlay: this.eventOverlay,
       catchBanner: this.catchBanner,
       noteLane: this.noteLane,
       frenzyOverlay: this.frenzyOverlay,
+      battleChaseView: this.battleChaseView,
+      gameState: this.gameStateController,
       shake: (amplitude: number, duration: number) => scene.triggerShake(amplitude, duration),
       hungerSystem: this.hungerSystem,
       weatherSystem: this.weatherSystem,

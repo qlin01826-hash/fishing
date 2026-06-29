@@ -85,9 +85,8 @@ function buildProfile(index: number): StageProfile {
     willpowerMul: lerp(0.8, 1.7, tier),
     // Strictness floor stays 0 through the shallows, then ramps in.
     strictnessFloor: Math.max(0, lerp(-0.2, 0.82, tier)),
-    // Bright shallows (stages 0–2) keep depthMood at 0; the descent
-    // proper begins after, ramping to full dark in the abyss.
-    depthMood: clamp01((index - 2) / (maxIndex - 2)),
+    // Bright shallows still start at 0, but voyage now drives visuals from t=0.
+    depthMood: clamp01((index - 1) / Math.max(1, maxIndex - 1)),
   }
 }
 
@@ -158,6 +157,8 @@ export class ProgressionSystem {
       this.stageIndex = target
       this.stageJustAdvanced = true
       if (STAGES[this.stageIndex].zone > prevZone) this.zoneJustAdvanced = true
+      this.legProgress = 0
+      this.voyageProgress = this.stageIndex / Math.max(1, STAGE_COUNT - 1)
       return true
     }
     return false
@@ -185,6 +186,50 @@ export class ProgressionSystem {
     return v
   }
 
+  /** Continuous 0..1 voyage position — boat sailing through the 15 legs. */
+  private voyageProgress = 0
+  /** Progress 0..1 within the current stage leg (between catches). */
+  private legProgress = 0
+  /** Cumulative world scroll in px — drives visible forward motion. */
+  private worldScrollPx = 0
+
+  /** Current voyage position 0..1 (advances while the boat is underway). */
+  get voyage(): number {
+    return this.voyageProgress
+  }
+
+  /** Pixel distance sailed this run — used for parallax and seabed shift. */
+  get scroll(): number {
+    return this.worldScrollPx
+  }
+
+  /**
+   * Depth atmosphere from geographic position along the voyage, so the
+   * scene darkens gradually while sailing — not only on catch.
+   */
+  getVoyageDepthMood(): number {
+    return clamp01(this.voyageProgress)
+  }
+
+  /**
+   * Advance the voyage while the boat is moving. Scroll accumulates in
+   * pixels so the scene visibly leaves the beach within seconds.
+   */
+  updateVoyage(dtSeconds: number, underway: boolean, viewportWidth: number): void {
+    if (!underway) return
+    const legSpan = 1 / Math.max(1, STAGE_COUNT - 1)
+    const legSpeed = 0.055
+    this.legProgress = Math.min(0.98, this.legProgress + dtSeconds * legSpeed)
+    const base = this.stageIndex / Math.max(1, STAGE_COUNT - 1)
+    const legVoyage = Math.min(1, base + this.legProgress * legSpan)
+
+    const runSpan = Math.max(400, viewportWidth * 4.5)
+    const depthMul = 1 + this.stageIndex * 0.14 + legVoyage * 0.2
+    this.worldScrollPx += dtSeconds * 140 * depthMul
+    const scrollVoyage = clamp01(this.worldScrollPx / runSpan)
+    this.voyageProgress = Math.max(legVoyage, scrollVoyage)
+  }
+
   /** Reset for a brand-new run. */
   reset(): void {
     this.catches = 0
@@ -192,5 +237,8 @@ export class ProgressionSystem {
     this.stageJustAdvanced = false
     this.zoneJustAdvanced = false
     this.momentum = 0.4
+    this.voyageProgress = 0
+    this.legProgress = 0
+    this.worldScrollPx = 0
   }
 }

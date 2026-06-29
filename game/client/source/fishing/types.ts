@@ -62,12 +62,12 @@ export interface FishDef {
   maxDepth: number
 }
 
-/** Wind tier: derived from penguin hunger. */
+/** Wind tier: driven mainly by voyage depth; hunger adds a boost. */
 export type WindTier = 'calm' | 'breeze' | 'strong' | 'storm'
 
 export interface WeatherSnapshot {
   tier: WindTier
-  /** Continuous 0..1 intensity, smoothly interpolated from hunger. */
+  /** Continuous 0..1 intensity from zone/voyage depth (+ hunger boost). */
   intensity: number
   /** Horizontal drift added to cast trajectories (px/s @ unit power). */
   windPush: number
@@ -96,6 +96,9 @@ export type FishingStateId =
   | 'hooked'
   | 'battle'
   | 'catch'
+
+/** Re-export render-mode enum (orthogonal to gameplay FishingStateId). */
+export { GameRenderMode } from './chase/GameStateController'
 
 /** Constants shared across the fishing game. */
 export const FISHING_CONSTANTS = {

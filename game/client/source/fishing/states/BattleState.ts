@@ -1,10 +1,11 @@
 import { t } from '@minigame/i18n'
 import type { IFishingState } from '../StateMachine'
 import type { FishingContext } from '../FishingContext'
-import type { Direction, FishDef, FishingStateId } from '../types'
+import type { FishDef, FishingStateId } from '../types'
 import { FISHING_CONSTANTS } from '../types'
 import type { AmbientFish } from '../entities/FishSchool'
 import type { TapJudgement } from '../ui/PullPanel'
+import { chaseProjectionForViewport } from '../battle/BattlePath'
 import { sectionForStage } from '../systems/AudioSystem'
 import { CatchState } from './CatchState'
 import { SailingState } from './SailingState'
@@ -14,40 +15,23 @@ interface BattlePayload {
 }
 
 /**
- * The fight phase — the core rhythm game.
+ * Fight phase — same rhythm shell as sailing / lure:
  *
- * Two ORTHOGONAL judgement tracks, each with its own progress bar:
+ * **One action per downbeat**: tap {@link PullPanel} (or SPACE) on the beat.
  *
- * 1. **Base beat (底拍)** — drives the TOP tension bar.
- *    - Notes scroll right→left on the {@link NoteLane}. The player taps
- *      the {@link PullPanel} as each note reaches the hit zone.
- *    - Perfect/Good taps nudge the white tracker toward the safe zone
- *      centre and reset the missed-beat counter.
- *    - Two consecutive auto-missed beats put the fish into a STRUGGLE
- *      state: the tracker drifts steadily AWAY from safe. Any successful
- *      tap pulls it back and ends the struggle.
- *    - Base-beat outcomes never modify the catch-success bar.
+ * - **Tension bar (top)**: Perfect/Good pulls the marker toward the safe
+ *   zone; two consecutive missed downbeats → STRUGGLE (marker drifts out).
+ *   Stay out too long → line snap.
+ * - **Willpower bar (right)**: Each on-beat Perfect/Good shaves willpower;
+ *   holding inside the safe zone adds a slow background drain. Willpower
+ *   at zero → catch.
  *
- * 2. **Enhanced beats (加强拍)** — drive the RIGHT willpower bar.
- *    - "Follow fish" event: hold inside the moving yellow ring until
- *      its progress arc fills.
- *      Success → -big chunk of willpower (closer to catch).
- *      Failure → +small chunk of willpower (knocked back).
- *    - "Fish running" event: counter-swipe in the indicated direction.
- *      Same success/failure willpower swing.
- *    - Enhanced-beat outcomes never modify the tension tracker.
- *
- * 3. Background drain: while the tracker is inside the safe zone, the
- *    willpower bar slowly leaks down. So patient base-beat play wins
- *    eventually; perfect enhanced play wins fast.
- *
- * Pointer routing: PullPanel handles its own Pixi pointer events and
- * forwards every tap into BattleState via {@link onPullJudgement}.
- * Raw canvas pointer events from the scene flow into onPointer*; we
- * skip the ones inside the pull panel so the two input layers don't
- * fight.
+ * NoteLane and follow/run overlays are intentionally unused here so the
+ * player reads one metronome, not two parallel rhythm games.
  */
-type EventKind = 'idle' | 'follow' | 'run'
+/** Willpower chunk removed per on-beat tap (fraction of initial bar). */
+const WP_DRAIN_PERFECT = 0.075
+const WP_DRAIN_GOOD = 0.042
 
 export class BattleState implements IFishingState {
   readonly id: FishingStateId = 'battle'
@@ -78,7 +62,10 @@ export class BattleState implements IFishingState {
   /** Direction the struggle is pushing the tracker (-1 or +1). Re-rolled when struggle starts. */
   private struggleDir = 1
   /** Saved binding to remove the pull-panel listener on exit. */
-  private readonly pullListener: (j: TapJudgement, nowMs: number) => void
+  private readonly pullListener: (j: TapJudgement, nowMs: number, beatPhase: number) => void
+
+  /** Once-per-fight guard so deviation failure doesn't re-fire every frame. */
+  private overboardPlaying = false
 
   // --- Layer 1b: Fish Frenzy burst ---
   /** True during the celebration window after the zone hits the ceiling. */
@@ -93,10 +80,13 @@ export class BattleState implements IFishingState {
   private frenzyLastPaidBeat = -1
   /** Minimum frenzy duration in beats (so a single peak still feels meaningful). */
   private readonly frenzyMinBeats = 8
-  /** Cached auto-miss counter so we can detect FRESH misses each frame. */
-  private lastSeenAutoMisses = 0
+  /** Consecutive downbeats without an on-beat Perfect/Good tap. */
+  private consecutiveBeatMisses = 0
+  /** Set true when the player lands Perfect/Good on the current beat. */
+  private beatHitThisDownbeat = false
+  private prevDownbeatPhase = 0.5
 
-  // --- Layer 2: willpower (enhanced beats + background drain) ---
+  // --- Layer 2: willpower (on-beat taps + background drain) ---
   private willpower: number
   private readonly initialWillpower: number
 
@@ -122,31 +112,8 @@ export class BattleState implements IFishingState {
    */
   private tugEnvelope = 0
 
-  // --- Event scheduler ---
-  private eventKind: EventKind = 'idle'
-  private nextEventInMs = 7500
-  private followLocksLeft: number
-  private followLockProgress = 0
-  private eventTimeMs = 0
-  private eventWindowMs = 2200
-  private runDirection: Direction = 'up'
-  private runConsumed = false
-
-  // --- Music intensity arc ---
-  /**
-   * Beats remaining before the next intensity decay step. Bumps reset
-   * this to `intensityDecayBeats`. When it hits zero AND music intensity
-   * is > 0, the soundtrack drops one layer and the timer reloads.
-   *
-   * 8 beats at 88..120 BPM is roughly 4–5 seconds — long enough that a
-   * skilled player can stack consecutive enhanced beats and ride the
-   * ramp all the way to L3, while a one-off lucky hit dies back down
-   * before the next bar lands.
-   */
-  private decayBeatsLeft = 0
-  private readonly intensityDecayBeats = 8
-  /** Snapshot of last-seen beat index so we can drive decay per-beat in update(). */
-  private lastSeenBeat = 0
+  /** Beat index for passive safe-zone shrink (one step per downbeat). */
+  private lastSafeDecayBeat = 0
 
   constructor(ctx: FishingContext) {
     this.ctx = ctx
@@ -164,17 +131,19 @@ export class BattleState implements IFishingState {
     // doesn't just cancel out — see updateWillpowerBackground).
     this.willpower = biter.def.willpower * stage.willpowerMul
     this.initialWillpower = this.willpower
-    this.followLocksLeft = biter.def.followLocks
     // Wider safe zone on shallow stages (windowMul > 1), tighter in the
     // abyss. Strictness floor also pinches it on deep fish.
     this.safeHalfBase = Math.max(0.08, 0.18 - this.effStrictness * 0.1) * stage.windowMul
     this.safeHalf = this.safeHalfBase
-    this.pullListener = (j, now) => this.onPullJudgement(j, now)
+    this.pullListener = (j, now, beatPhase) => this.onPullJudgement(j, now, beatPhase)
   }
 
   enter(payload?: unknown): void {
     const p = payload as BattlePayload | undefined
     this.ambient = p?.ambient ?? null
+    if (!this.ctx.gameState.isChase3D()) {
+      this.ctx.gameState.enterChaseDirect()
+    }
     if (this.ambient) {
       this.fishTargetX = this.ambient.x
       this.fishTargetY = this.ambient.y
@@ -186,10 +155,18 @@ export class BattleState implements IFishingState {
     this.ctx.tensionBar.container.visible = true
     this.ctx.willpowerBar.container.visible = true
     this.ctx.pullPanel.container.visible = true
-    this.ctx.noteLane.container.visible = true
+    this.ctx.noteLane.container.visible = false
     this.ctx.pullPanel.reset()
+    this.ctx.pullPanel.setMode('battle')
     this.ctx.reelButtons.setVisible(false)
     this.ctx.eventOverlay.hide()
+    this.ctx.boat.resetDeviation()
+
+    this.ctx.battleChaseView.setFishTint(this.def.color)
+    this.ctx.penguin.beginPathChase()
+    this.ctx.penguin.hideBubble()
+    this.ctx.hook.container.visible = false
+    if (this.ambient) this.ambient.graphic.visible = false
 
     // Music: tempo scales with hunger-driven weather intensity, and the
     // *starting section* of the song scales with how many fish the
@@ -218,78 +195,53 @@ export class BattleState implements IFishingState {
     // music would cut out the moment the fight starts.
     this.ctx.audio.resyncScheduler()
     this.ctx.audio.riseToSection(startSection)
-    // start() resets the lane, so apply the stage's chart density range
-    // + reaction speed (look-ahead) AFTER it. Look-ahead only matters in
-    // update()'s spawn horizon, so post-start is the correct moment.
-    this.ctx.noteLane.start()
-    this.ctx.noteLane.setDensityRange(stage.noteFloor, stage.noteCap)
-    this.ctx.noteLane.setLookAhead(stage.noteLookAheadBeats)
-    // Mirror the audio's starting intensity into the note lane; the
-    // density range above clamps it to the stage's window.
-    this.ctx.noteLane.setIntensity(this.ctx.audio.getMusicIntensity())
-    this.decayBeatsLeft = 0
-    this.lastSeenBeat = this.ctx.beatClock.currentBeat()
 
-    // PullPanel taps now flow through us so we can update tension state
-    // (and forward the same judgement into the NoteLane).
     this.ctx.pullPanel.onJudgement = this.pullListener
 
-    // First enhanced beat takes ~8s — gives the player the entire
-    // intro (2 bars) and the first half of the verse to lock into the
-    // rhythm before being asked to react to anything special.
-    this.nextEventInMs = 7500
-
-    // Reset frenzy / dynamic zone state so a previous battle's data
-    // can't leak in.
     this.frenzyActive = false
     this.frenzyBeatsLeft = 0
     this.frenzyArmed = true
     this.frenzyLastPaidBeat = -1
-    this.lastSeenAutoMisses = 0
+    this.consecutiveBeatMisses = 0
+    this.beatHitThisDownbeat = false
+    this.prevDownbeatPhase = this.ctx.beatClock.started ? this.ctx.beatClock.phase() : 0.5
+    this.lastSafeDecayBeat = this.ctx.beatClock.currentBeat()
+    this.overboardPlaying = false
     this.ctx.frenzyOverlay.deactivate()
     this.ctx.fishSchool.setFrenzyAmount(0)
     this.ctx.tensionBar.setFrenzy(0, 1)
   }
 
   update(dtSeconds: number, _elapsedMs: number): void {
+    if (this.overboardPlaying) {
+      this.ctx.pullPanel.update(dtSeconds, performance.now())
+      return
+    }
     // Tug first so the fresh offset is ready when updateFish renders
     // the fish via moveFish this same frame.
     this.updateTug(dtSeconds)
     this.updateFish(dtSeconds)
+    this.checkDownbeat()
     this.updateTension(dtSeconds)
     this.updateSafeWidth(dtSeconds)
     this.updateFrenzy(dtSeconds)
     this.ctx.pullPanel.update(dtSeconds, performance.now())
-    this.processNoteLaneOutcomes()
     this.updateWillpowerBackground(dtSeconds)
-    this.updateEvents(dtSeconds)
-    this.updateMusicIntensityDecay()
     this.updateUi()
+    if (this.ctx.boat.getDeviation() >= 1 || this.ctx.boat.getWaveSubmerge() >= 0.92) {
+      this.overboardFail()
+      return
+    }
     this.checkOutcomes()
   }
 
   // ---- pointer routing ----
 
-  onPointerDown(x: number, y: number, pointerId: number): void {
-    if (this.isInsidePullPanel(x, y)) return
-    this.ctx.pointer.pointerDown(x, y, pointerId, performance.now())
-  }
+  onPointerDown(_x: number, _y: number, _pointerId: number): void {}
 
-  onPointerMove(x: number, y: number, pointerId: number): void {
-    if (this.isInsidePullPanel(x, y)) return
-    this.ctx.pointer.pointerMove(x, y, pointerId, performance.now())
-  }
+  onPointerMove(_x: number, _y: number, _pointerId: number): void {}
 
   onPointerUp(_x: number, _y: number, pointerId: number): void {
-    const now = performance.now()
-    if (this.eventKind === 'run' && !this.runConsumed) {
-      const { dx, dy } = this.ctx.pointer.totalDelta()
-      const speed = this.ctx.pointer.instantSpeed(now)
-      if (this.matchesRunCounter(dx, dy, speed)) {
-        this.runConsumed = true
-        this.endRunEvent(true)
-      }
-    }
     this.ctx.pointer.pointerUp(pointerId)
   }
 
@@ -311,7 +263,10 @@ export class BattleState implements IFishingState {
     this.ctx.fishSchool.setFrenzyAmount(0)
     this.ctx.tensionBar.setFrenzy(0, 1)
     this.ctx.whale.dismiss()
+    this.ctx.penguin.endPathChase()
     this.ctx.penguin.returnToBoat()
+    this.ctx.gameState.resetToFishing()
+    this.ctx.hook.container.visible = true
     // Tear down our binding so a stale battle instance can't keep
     // observing the (shared) PullPanel after we've exited.
     if (this.ctx.pullPanel.onJudgement === this.pullListener) {
@@ -326,11 +281,12 @@ export class BattleState implements IFishingState {
   // ---- subsystem updates ----
 
   private updateFish(dtSeconds: number): void {
+    if (this.ctx.battleChaseView.isActive()) return
     if (!this.ambient) return
     this.fishTargetTimer -= dtSeconds
     if (this.fishTargetTimer <= 0) {
       // Struggling fish thrashes harder, run-event fish darts farther.
-      const baseRange = this.eventKind === 'run' ? 220 : 90
+      const baseRange = this.struggling ? 160 : 90
       const range = this.struggling ? baseRange * 1.8 : baseRange
       this.fishTargetX = this.ambient.x + (Math.random() - 0.5) * range
       this.fishTargetY = this.ambient.y + (Math.random() - 0.5) * range * 0.4
@@ -370,6 +326,11 @@ export class BattleState implements IFishingState {
    * it can't unbalance the catch math.
    */
   private updateTug(dtSeconds: number): void {
+    if (this.ctx.battleChaseView.isActive()) {
+      this.tugEnvelope = 0
+      this.ctx.hook.setLineTension(0)
+      return
+    }
     if (!this.ambient || this.ctx.hook.getMode() !== 'fight') {
       this.tugEnvelope = 0
       this.ctx.hook.setLineTension(0)
@@ -474,73 +435,82 @@ export class BattleState implements IFishingState {
   }
 
   /** Called by PullPanel on every tap (via the listener wired in enter). */
-  private onPullJudgement(judgement: TapJudgement, nowMs: number): void {
-    // Forward to the lane so the closest note gets consumed (or not).
-    this.ctx.noteLane.registerTap(judgement, nowMs)
+  private onPullJudgement(judgement: TapJudgement, _nowMs: number, beatPhase: number): void {
+    this.ctx.boat.applyRhythmJudgement(judgement, beatPhase)
+    if (judgement === 'perfect' || judgement === 'good') {
+      this.ctx.ocean.triggerWaveBreak(judgement === 'perfect' ? 1 : 0.65)
+      this.ctx.ocean.triggerCrestBurst(this.ctx.boat.deckCenterX)
+      const { width, height } = this.ctx.viewport
+      const proj = chaseProjectionForViewport(width, height)
+      const scroll =
+        this.ctx.beatClock.currentBeat() + this.ctx.beatClock.phase()
+      this.ctx.battleChaseView.aimAtRequiredLx(scroll, proj.cx, proj.lateralPix)
+      this.ctx.battleChaseView.triggerApexBurst()
+      this.beatHitThisDownbeat = true
+      this.consecutiveBeatMisses = 0
+    } else {
+      this.ctx.shake(5, 0.22)
+    }
 
     const toCenter = this.safeCenter - this.trackerT
     if (judgement === 'perfect') {
       this.trackerT += toCenter * 0.55
-      // A correct tap always resets the missed-beat streak even if no
-      // lane note happened to be in the window (lead-in beats, between
-      // events, etc.) — playing in rhythm is what matters.
-      this.ctx.noteLane.consecutiveAutoMisses = 0
       this.clearStruggle()
-      // Reward: zone grows. Bigger zone = easier to stay in.
       this.growSafeHalf(0.040)
-      // Frenzy bonus: each perfect tap during frenzy pays out extra
-      // willpower damage + score (the player feels they're shredding).
+      this.willpower = Math.max(0, this.willpower - this.initialWillpower * WP_DRAIN_PERFECT)
       if (this.frenzyActive) {
-        this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.010)
+        this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.012)
         this.ctx.addScore(2)
       }
     } else if (judgement === 'good') {
       this.trackerT += toCenter * 0.28
-      this.ctx.noteLane.consecutiveAutoMisses = 0
       this.clearStruggle()
       this.growSafeHalf(0.018)
+      this.willpower = Math.max(0, this.willpower - this.initialWillpower * WP_DRAIN_GOOD)
       if (this.frenzyActive) {
-        this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.006)
+        this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.007)
         this.ctx.addScore(1)
       }
     } else {
-      // Explicit off-beat tap: tiny shove away, no struggle escalation
-      // (auto-misses on missed BEATS are the canonical struggle trigger).
       this.trackerT -= Math.sign(toCenter) * 0.04
       this.ctx.shake(4, 0.12)
       this.shrinkSafeHalf(0.025)
     }
   }
 
-  /**
-   * Pull-side bookkeeping for note auto-misses. Two in a row triggers
-   * the struggle state until the next successful hit. Each new auto-
-   * miss also shrinks the safe zone (same penalty schedule as an
-   * explicit bad tap) so passive players don't passively keep frenzy.
-   */
-  private processNoteLaneOutcomes(): void {
-    const currentMisses = this.ctx.noteLane.consecutiveAutoMisses
-    if (currentMisses > this.lastSeenAutoMisses) {
-      const delta = currentMisses - this.lastSeenAutoMisses
-      // Each fresh auto-miss is slightly less harsh than a bad TAP.
-      this.shrinkSafeHalf(0.015 * delta)
-    }
-    this.lastSeenAutoMisses = currentMisses
+  private checkDownbeat(): void {
+    const clock = this.ctx.beatClock
+    if (!clock.started) return
+    const phase = clock.phase()
+    const isDownbeat =
+      (this.prevDownbeatPhase > 0.6 && phase < 0.4) || phase < this.prevDownbeatPhase - 0.5
+    if (isDownbeat) this.onBattleDownbeat()
+    this.prevDownbeatPhase = phase
+  }
 
-    if (!this.struggling && currentMisses >= 2) {
-      this.struggling = true
-      this.struggleDir = Math.sign(this.trackerT - this.safeCenter) || (Math.random() < 0.5 ? -1 : 1)
-      this.ctx.pullPanel.setStruggling(true)
-      this.ctx.shake(8, 0.35)
-      this.ctx.audio.playFail()
+  /** End of beat window — player must have landed Perfect/Good since last downbeat. */
+  private onBattleDownbeat(): void {
+    if (!this.beatHitThisDownbeat) {
+      this.consecutiveBeatMisses += 1
+      this.shrinkSafeHalf(0.014)
+      if (!this.struggling && this.consecutiveBeatMisses >= 2) {
+        this.struggling = true
+        this.struggleDir = Math.sign(this.trackerT - this.safeCenter) || (Math.random() < 0.5 ? -1 : 1)
+        this.ctx.pullPanel.setStruggling(true)
+        this.ctx.shake(8, 0.35)
+        this.ctx.audio.playFail()
+      }
+    } else {
+      this.consecutiveBeatMisses = 0
     }
+    this.beatHitThisDownbeat = false
   }
 
   private clearStruggle(): void {
     if (this.struggling) {
       this.struggling = false
+      this.consecutiveBeatMisses = 0
       this.ctx.pullPanel.setStruggling(false)
-      this.ctx.noteLane.consecutiveAutoMisses = 0
       this.ctx.audio.playKick()
     }
   }
@@ -605,11 +575,9 @@ export class BattleState implements IFishingState {
   private updateSafeWidth(_dtSeconds: number): void {
     if (this.frenzyActive) return
     const beat = this.ctx.beatClock.currentBeat()
-    if (beat === this.lastSeenBeat) return
-    // (decay actually happens via updateMusicIntensityDecay which also
-    // tracks beat ticks — we piggy-back on its delta here so we don't
-    // need a second beat-tracker.)
-    const delta = beat - this.lastSeenBeat
+    if (beat === this.lastSafeDecayBeat) return
+    const delta = beat - this.lastSafeDecayBeat
+    this.lastSafeDecayBeat = beat
     if (delta > 0) {
       this.shrinkSafeHalf(0.008 * delta)
     }
@@ -664,7 +632,7 @@ export class BattleState implements IFishingState {
       this.ctx.beatClock.started ? this.ctx.beatClock.phase(performance.now()) : 0.5,
     )
     // Keep the penguin's swim orbit centred on the boat as it bobs.
-    if (this.frenzyActive) {
+    if (this.frenzyActive && !this.ctx.penguin.isPathChasing()) {
       const boatX = this.ctx.boat.deckCenterX
       const orbitY = this.ctx.viewport.waterLineY + 28
       const rx = Math.min(140, this.ctx.viewport.width * 0.18)
@@ -680,9 +648,8 @@ export class BattleState implements IFishingState {
     this.frenzyLastPaidBeat = this.ctx.beatClock.currentBeat()
     // Audio: push intensity up two layers so the chorus opens up
     // around the player.
-    const lvl = this.ctx.audio.bumpMusicIntensity()
     this.ctx.audio.bumpMusicIntensity()
-    this.ctx.noteLane.setIntensity(Math.max(lvl, this.ctx.audio.getMusicIntensity()))
+    this.ctx.audio.bumpMusicIntensity()
     this.ctx.audio.playPerfectChime()
     this.ctx.frenzyOverlay.activate()
     this.ctx.shake(5, 0.35)
@@ -691,15 +658,13 @@ export class BattleState implements IFishingState {
     // to swim around the boat.
     this.ctx.fishSchool.triggerFrenzyBurst(12)
     this.ctx.whale.appear(this.ctx.viewport)
-    // Orbit centred on the boat, sitting just below the waterline so
-    // the penguin clearly dives INTO the sea instead of running laps
-    // on top of it. Radii scale to viewport so it stays in-frame even
-    // on small phones.
-    const boatX = this.ctx.boat.deckCenterX
-    const orbitY = this.ctx.viewport.waterLineY + 28
-    const rx = Math.min(140, this.ctx.viewport.width * 0.18)
-    const ry = Math.min(40, this.ctx.viewport.height * 0.07)
-    this.ctx.penguin.swimAroundBoat(boatX, orbitY, rx, ry)
+    if (!this.ctx.penguin.isPathChasing()) {
+      const boatX = this.ctx.boat.deckCenterX
+      const orbitY = this.ctx.viewport.waterLineY + 28
+      const rx = Math.min(140, this.ctx.viewport.width * 0.18)
+      const ry = Math.min(40, this.ctx.viewport.height * 0.07)
+      this.ctx.penguin.swimAroundBoat(boatX, orbitY, rx, ry)
+    }
     // Penguin can't contain its excitement — star eyes for the duration
     // of the frenzy. We don't bother restoring it here; SailingState
     // re-picks a mood based on hunger as soon as the battle resolves.
@@ -718,38 +683,8 @@ export class BattleState implements IFishingState {
     this.frenzyArmed = true
     // Send the cameo cast home.
     this.ctx.whale.dismiss()
-    this.ctx.penguin.returnToBoat()
-  }
-
-  private updateEvents(dtSeconds: number): void {
-    if (this.eventKind === 'idle') {
-      this.nextEventInMs -= dtSeconds * 1000
-      if (this.nextEventInMs <= 0) {
-        this.startNextEvent()
-      }
-      return
-    }
-    this.eventTimeMs += dtSeconds * 1000
-    if (this.eventKind === 'follow') {
-      if (this.ambient) {
-        this.ctx.eventOverlay.setFollowTarget(this.ambient.x, this.ambient.y)
-      }
-      const tracker = this.ctx.pointer
-      if (tracker.active && this.isInsideFollowRing(tracker.x, tracker.y)) {
-        this.followLockProgress = Math.min(1, this.followLockProgress + dtSeconds * 0.65)
-      } else {
-        this.followLockProgress = Math.max(0, this.followLockProgress - dtSeconds * 0.4)
-      }
-      this.ctx.eventOverlay.setFollowProgress(this.followLockProgress)
-      if (this.followLockProgress >= 1) {
-        this.endFollowEvent(true)
-      } else if (this.eventTimeMs > this.eventWindowMs) {
-        this.endFollowEvent(false)
-      }
-    } else if (this.eventKind === 'run') {
-      if (this.eventTimeMs > this.eventWindowMs) {
-        if (!this.runConsumed) this.endRunEvent(false)
-      }
+    if (!this.ctx.penguin.isPathChasing()) {
+      this.ctx.penguin.returnToBoat()
     }
   }
 
@@ -767,7 +702,6 @@ export class BattleState implements IFishingState {
       Math.max(0, this.willpower / this.initialWillpower),
       this.def.color,
     )
-    this.ctx.eventOverlay.update(1 / 60)
   }
 
   private checkOutcomes(): void {
@@ -778,167 +712,6 @@ export class BattleState implements IFishingState {
     if (this.willpower <= 0) {
       this.win()
     }
-  }
-
-  private startNextEvent(): void {
-    const wantFollow =
-      this.followLocksLeft > 0 && Math.random() < 0.55 + 0.15 * Math.random()
-    if (wantFollow) {
-      this.eventKind = 'follow'
-      this.eventTimeMs = 0
-      this.eventWindowMs = (4200 + Math.random() * 1200) * this.windowMul
-      this.followLockProgress = 0
-      const radius = (80 - this.effStrictness * 30) * this.windowMul
-      if (this.ambient) {
-        this.ctx.eventOverlay.showFollow(this.ambient.x, this.ambient.y, radius)
-      } else {
-        this.ctx.eventOverlay.showFollow(
-          this.ctx.viewport.width / 2,
-          this.ctx.viewport.height * 0.6,
-          radius,
-        )
-      }
-      this.ctx.audio.playFollowCue()
-    } else {
-      this.eventKind = 'run'
-      this.eventTimeMs = 0
-      this.eventWindowMs = (2000 - this.effStrictness * 600) * this.windowMul
-      this.runConsumed = false
-      this.runDirection = (['up', 'down', 'left', 'right'] as Direction[])[
-        Math.floor(Math.random() * 4)
-      ]
-      this.ctx.eventOverlay.showRun(this.runDirection)
-      this.ctx.audio.playRunCue()
-    }
-    // The boat is "passing by a rock with a mermaid on it." She slides
-    // in for the duration of the enhanced beat and visibly sings —
-    // every brass/choir cue the player hears is now coming from HER.
-    this.ctx.mermaidRock.show()
-  }
-
-  /**
-   * Per the spec rewrite: enhanced beats ONLY swing the willpower bar.
-   * They do NOT punish or reward the tension tracker; that's the
-   * exclusive domain of the rhythm taps.
-   *
-   * A SUCCESS here also acts as the music "trigger point": it bumps the
-   * soundtrack one intensity level (adding a brass / hat / bass layer)
-   * and pushes the note chart up one rhythmic density tier. Both are
-   * crossfades, so the player hears the arrangement physically open up
-   * around the moment they nail the enhanced beat.
-   */
-  private endFollowEvent(success: boolean): void {
-    if (success) {
-      this.followLocksLeft = Math.max(0, this.followLocksLeft - 1)
-      // Halved from 0.22 → 0.10 so a 30-second battle keeps fights
-      // long enough for the song to actually progress through its
-      // intro → verse → chorus arc. With ~4 successful events that's
-      // still ~40% of willpower from enhanced beats alone.
-      this.willpower -= this.initialWillpower * 0.10
-      this.ctx.audio.playPerfectChime()
-      this.ctx.shake(3, 0.18)
-      this.bumpMusicIntensity()
-    } else {
-      // Failure restores some willpower (knocks back catch progress).
-      this.willpower = Math.min(
-        this.initialWillpower,
-        this.willpower + this.initialWillpower * 0.06,
-      )
-      this.ctx.audio.playFail()
-      this.ctx.shake(6, 0.22)
-    }
-    this.eventKind = 'idle'
-    this.ctx.eventOverlay.hide()
-    // Mermaid finishes her phrase — slides back out as the boat moves on.
-    this.ctx.mermaidRock.hide()
-    // Event cadence stretched so the player gets several bars of base-
-    // beat play between enhanced beats — that's when the rhythm of the
-    // music is actually audible.
-    this.nextEventInMs = 5500 + Math.random() * 3500
-  }
-
-  private endRunEvent(success: boolean): void {
-    if (success) {
-      this.willpower -= this.initialWillpower * 0.12
-      this.ctx.audio.playPerfectChime()
-      this.ctx.shake(3, 0.18)
-      this.bumpMusicIntensity()
-    } else {
-      this.willpower = Math.min(
-        this.initialWillpower,
-        this.willpower + this.initialWillpower * 0.07,
-      )
-      this.ctx.audio.playFail()
-      this.ctx.shake(8, 0.3)
-    }
-    this.eventKind = 'idle'
-    this.ctx.eventOverlay.hide()
-    this.ctx.mermaidRock.hide()
-    this.nextEventInMs = 5000 + Math.random() * 3500
-  }
-
-  /**
-   * Drive both the audio layers and the visual chart density up by one
-   * level, and re-arm the decay timer so the boost holds for a few
-   * bars before slipping back down.
-   */
-  private bumpMusicIntensity(): void {
-    const newLevel = this.ctx.audio.bumpMusicIntensity()
-    this.ctx.noteLane.setIntensity(newLevel)
-    this.decayBeatsLeft = this.intensityDecayBeats
-  }
-
-  /**
-   * One step per beat (driven by the BeatClock): when the player stops
-   * triggering enhanced beats, the soundtrack/chart gradually de-escalate.
-   * We tick on integer beat boundaries so the decay lines up musically
-   * — a layer never drops mid-phrase, it always drops on a downbeat.
-   */
-  private updateMusicIntensityDecay(): void {
-    const beat = this.ctx.beatClock.currentBeat()
-    if (beat === this.lastSeenBeat) return
-    const beatsAdvanced = beat - this.lastSeenBeat
-    this.lastSeenBeat = beat
-    if (this.decayBeatsLeft <= 0) {
-      // Already at baseline — nothing to decay.
-      if (this.ctx.audio.getMusicIntensity() <= 0) return
-      this.decayBeatsLeft = this.intensityDecayBeats
-      return
-    }
-    this.decayBeatsLeft = Math.max(0, this.decayBeatsLeft - beatsAdvanced)
-    if (this.decayBeatsLeft === 0 && this.ctx.audio.getMusicIntensity() > 0) {
-      const next = this.ctx.audio.decayMusicIntensity()
-      this.ctx.noteLane.setIntensity(next)
-      this.decayBeatsLeft = next > 0 ? this.intensityDecayBeats : 0
-    }
-  }
-
-  /**
-   * `runDirection` is the direction the PLAYER should swipe to counter
-   * the run. The arrow and text both display this direction.
-   */
-  private matchesRunCounter(dx: number, dy: number, speed: number): boolean {
-    if (Math.hypot(dx, dy) < 35 || speed < 250) return false
-    switch (this.runDirection) {
-      case 'up':
-        return dy < -35 && Math.abs(dy) > Math.abs(dx)
-      case 'down':
-        return dy > 35 && Math.abs(dy) > Math.abs(dx)
-      case 'left':
-        return dx < -35 && Math.abs(dx) > Math.abs(dy)
-      case 'right':
-        return dx > 35 && Math.abs(dx) > Math.abs(dy)
-    }
-  }
-
-  private isInsidePullPanel(x: number, y: number): boolean {
-    return this.ctx.pullPanel.containsGlobalPoint(x, y)
-  }
-
-  private isInsideFollowRing(x: number, y: number): boolean {
-    const dx = x - this.ctx.eventOverlay.ringX
-    const dy = y - this.ctx.eventOverlay.ringY
-    return Math.hypot(dx, dy) <= this.ctx.eventOverlay.ringRadius
   }
 
   private snap(): void {
@@ -954,6 +727,28 @@ export class BattleState implements IFishingState {
     this.ctx.activeBiter = null
     this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)
     this.ctx.goTo(new SailingState(this.ctx))
+  }
+
+  private overboardFail(): void {
+    if (this.overboardPlaying) return
+    this.overboardPlaying = true
+    this.ctx.pullPanel.container.visible = false
+    this.ctx.audio.playFail()
+    this.ctx.progression.reportSnap()
+    this.ctx.shake(14, 0.65)
+    this.ctx.mermaidRock.hide()
+    this.ctx.activeBiter = null
+    this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)
+    if (this.ambient) {
+      this.ctx.fishSchool.remove(this.ambient)
+      this.ambient = null
+    }
+    this.ctx.penguin.triggerOverboardFailure(() => {
+      this.ctx.boat.resetDeviation()
+      this.ctx.penguin.returnToBoat()
+      this.ctx.penguin.showMessage(t('game.overboardFail'), 'sad', 3200)
+      this.ctx.goTo(new SailingState(this.ctx))
+    })
   }
 
   private win(): void {

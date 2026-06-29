@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<!-- http://localhost:15173/battle-wireframe.html -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>战斗段 Wireframe v10 — 刀锋切线 · Apex · 鱼群间隙 · GoPro</title>
+  <style>
+    :root { --bg:#050c14; --panel:#0d1828; --line:#2a4a68; --text:#c8dff5; --muted:#5a7a9a; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:"SF Pro Text","PingFang SC",sans-serif; background:var(--bg); color:var(--text); padding:16px; line-height:1.45; }
+    h1 { font-size:1.2rem; margin-bottom:4px; }
+    .sub { color:var(--muted); font-size:0.82rem; max-width:900px; margin-bottom:10px; }
+    .tip { max-width:900px; margin:0 auto 8px; padding:8px 12px; background:#0a2038; border:1px solid #1e5080; border-radius:8px; font-size:0.75rem; color:#8ecfff; }
+    .phone { max-width:844px; margin:0 auto 10px; border:2px solid var(--line); border-radius:16px; overflow:hidden; box-shadow:0 16px 56px rgba(0,0,0,0.65); }
+    .phone-label { text-align:center; font-size:0.66rem; color:var(--muted); margin-bottom:4px; }
+    canvas#c3d { display:block; width:100%; max-width:844px; aspect-ratio:844/390; cursor:crosshair; }
+    .legend { max-width:900px; margin:10px auto 0; display:grid; gap:5px; font-size:0.76rem; }
+    .legend-item { display:grid; grid-template-columns:22px 1fr; gap:8px; padding:6px 10px; background:var(--panel); border-radius:6px; border:1px solid var(--line); }
+    .swatch { width:16px; height:16px; border-radius:3px; }
+  </style>
+</head>
+<body>
+  <h1>战斗段 Wireframe v10</h1>
+  <p class="sub">
+    <strong>刀锋切线</strong>：中央幽蓝内凹赛道，非斑马线。<strong>Apex 音爆环</strong>取代金球。
+    节拍空隙 → <strong>银色鱼群夹道</strong>；重拍连击 → GoPro 微推 + 水汽 Speed Lines。点击触发特技。
+  </p>
+  <div class="tip"><a href="/battle-wireframe.html" style="color:#5ec8ff">/battle-wireframe.html</a> · 点击 = Apex 特技判定</div>
+  <p class="phone-label">GoPro 尾随 · 空隙拉远 / 连击微推</p>
+  <div class="phone"><canvas id="c3d" width="844" height="390"></canvas></div>
+  <div class="legend">
+    <div class="legend-item"><div class="swatch" style="background:linear-gradient(90deg,#1a6088,#90e8ff)"></div><div><strong>Carved Line</strong> — 单板切雪式内凹水流剪影，沿旋律起伏甩尾</div></div>
+    <div class="legend-item"><div class="swatch" style="background:radial-gradient(circle,#a8f0ff,#3088c8)"></div><div><strong>Apex Gate</strong> — 嵌在切线上的音爆环 / 水流漩涡</div></div>
+    <div class="legend-item"><div class="swatch" style="background:linear-gradient(90deg,#8898a8,#e8f0f8)"></div><div><strong>Flow Interlude</strong> — 节拍留白时两侧银色沙丁鱼墙，重拍前散开</div></div>
+  </div>
+
+  <script>
+    const W=844,H=390,CX=W/2,CY=H*0.52;
+    const NEAR_X_HALF=W*0.088;
+    const Z_FAR=22,FOV_EXP=3.2,NEAR_BOOST=0.5,LINE_H=72;
+    const BPM=88,BEAT_SEC=60/BPM,BEATS_PER_BAR=8;
+
+  /* apex=重拍弯  rest=抒情空隙(鱼群)  carve=切线扭动锚点 */
+    const CHART=[
+      {type:'apex', x:0,    y:0.15},
+      {type:'rest', x:0.2,  y:0.5 },
+      {type:'rest', x:-0.1, y:0.35},
+      {type:'apex', x:0.55, y:1.1 },
+      {type:'apex', x:0.35, y:0.7 },
+      {type:'rest', x:-0.4, y:0.9 },
+      {type:'rest', x:-0.6, y:0.55},
+      {type:'rest', x:-0.25,y:0.25},
+      {type:'apex', x:0.7,  y:1.35},
+      {type:'apex', x:0.15, y:0.45},
+      {type:'rest', x:-0.5, y:1.0 },
+      {type:'apex', x:-0.75,y:0.65},
+    ];
+
+    let tgtLx=0,lx=0,stuntT=0,stuntKind=0,combo=0,lastBeat=-1;
+    const particles=[],fishPool=[],speedLines=[];
+    const canvas=document.getElementById('c3d'),ctx=canvas.getContext('2d');
+
+    canvas.addEventListener('pointerdown',()=>{
+      stuntT=1;
+      stuntKind=Math.floor(Math.random()*3);
+      combo=Math.min(12,combo+1);
+    });
+
+    function zT(z){const u=Math.max(0,Math.min(1,z/Z_FAR));return 1-Math.pow(1-u,FOV_EXP);}
+    function scaleZ(z){const t=zT(z);return (1/Math.pow(1+Math.max(0,z)*0.1,1.55))*(1+NEAR_BOOST*(1-t));}
+    function sizeMul(z){return scaleZ(z)*(1+2*Math.max(0,1-zT(z)));}
+
+    function sm(t){const x=Math.max(0,Math.min(1,t));return x*x*x*(x*(x*6-15)+10);}
+    function cr(p0,p1,p2,p3,t){const t2=t*t,t3=t2*t;return 0.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);}
+
+    function nodeAt(b){return CHART[((Math.floor(b)%BEATS_PER_BAR)+BEATS_PER_BAR)%BEATS_PER_BAR];}
+    function isRestBeat(b){return nodeAt(b).type==='rest';}
+
+    function lineAtBeat(b){
+      const u=((b/BEATS_PER_BAR)%1+1)%1,s=u*BEATS_PER_BAR,i=Math.floor(s)%BEATS_PER_BAR,f=sm(s-Math.floor(s));
+      const im=(i-1+BEATS_PER_BAR)%BEATS_PER_BAR,ip=(i+1)%BEATS_PER_BAR,i2=(i+2)%BEATS_PER_BAR;
+      const p=[CHART[im],CHART[i],CHART[ip],CHART[i2]];
+      return{x:cr(p[0].x,p[1].x,p[2].x,p[3].x,f),y:cr(p[0].y,p[1].y,p[2].y,p[3].y,f)};
+    }
+
+    function proj(wx,wy,z){
+      const t=zT(z),sc=scaleZ(z);
+      const vpY=H*0.06,judgeY=H*0.82;
+      const y=judgeY-t*(judgeY-vpY)-wy*LINE_H*sc;
+      return{x:CX+wx*NEAR_X_HALF*sc,y,s:sc,sm:sizeMul(z),z,t};
+    }
+
+    function sampleLine(scroll,z0,z1,steps){
+      const pts=[];
+      for(let i=0;i<=steps;i++){
+        const z=z0+(z1-z0)*(i/steps);
+        const bt=scroll+z;
+        const s=lineAtBeat(bt);
+        pts.push(proj(s.x,s.y,z));
+      }
+      return pts;
+    }
+
+    function phaseAt(scroll){
+      let restN=0,apexN=0;
+      for(let b=Math.floor(scroll);b<Math.floor(scroll)+4;b++){
+        if(isRestBeat(b))restN++;else apexN++;
+      }
+      const calm=restN>=2?1:0;
+      const intense=apexN>=3?1:Math.min(1,combo*0.12);
+      return{calm,intense,rest:restN>apexN};
+    }
+
+    function drawRift(){
+      const g=ctx.createLinearGradient(0,0,0,H);
+      g.addColorStop(0,'#040a12');g.addColorStop(0.35,'#081828');g.addColorStop(0.7,'#0a1c30');g.addColorStop(1,'#030810');
+      ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='rgba(20,50,80,0.35)';
+      ctx.beginPath();ctx.moveTo(CX-120,0);ctx.lineTo(CX+80,0);ctx.lineTo(CX+40,H);ctx.lineTo(CX-60,H);ctx.closePath();ctx.fill();
+      ctx.fillStyle='rgba(0,0,0,0.45)';
+      ctx.fillRect(0,0,W*0.08,H);ctx.fillRect(W*0.92,0,W*0.08,H);
+    }
+
+    function drawCarvedLine(pts,scroll){
+      if(pts.length<2)return;
+      const build=(off,curve)=>{
+        const L=[],R=[],C=[];
+        for(let i=0;i<pts.length;i++){
+          const p=pts[i];
+          let nx,ny;
+          if(i<pts.length-1){nx=pts[i+1].x-p.x;ny=pts[i+1].y-p.y;}
+          else{nx=p.x-pts[i-1].x;ny=p.y-pts[i-1].y;}
+          const len=Math.hypot(nx,ny)||1;
+          const w=off*p.sm*(1+curve*0.15);
+          const px=-ny/len,py=nx/len;
+          L.push({x:p.x-px*w,y:p.y-py*w});
+          R.push({x:p.x+px*w,y:p.y+py*w});
+          C.push({x:p.x,y:p.y,sm:p.sm});
+        }
+        return{L,R,C};
+      };
+      const groove=build(5,1),edge=build(11,0);
+      ctx.beginPath();ctx.moveTo(groove.L[0].x,groove.L[0].y);
+      for(let i=1;i<groove.L.length;i++)ctx.lineTo(groove.L[i].x,groove.L[i].y);
+      for(let i=groove.R.length-1;i>=0;i--)ctx.lineTo(groove.R[i].x,groove.R[i].y);
+      ctx.closePath();
+      const cg=ctx.createLinearGradient(CX,pts[0].y,CX,pts[pts.length-1].y);
+      cg.addColorStop(0,'rgba(15,55,90,0.08)');cg.addColorStop(0.5,'rgba(30,100,150,0.28)');cg.addColorStop(1,'rgba(60,180,220,0.12)');
+      ctx.fillStyle=cg;ctx.fill();
+
+      ctx.beginPath();ctx.moveTo(edge.L[0].x,edge.L[0].y);
+      for(let i=1;i<edge.L.length;i++)ctx.lineTo(edge.L[i].x,edge.L[i].y);
+      ctx.strokeStyle='rgba(50,140,190,0.22)';ctx.lineWidth=1.2;ctx.lineCap='round';ctx.stroke();
+      ctx.beginPath();ctx.moveTo(edge.R[0].x,edge.R[0].y);
+      for(let i=1;i<edge.R.length;i++)ctx.lineTo(edge.R[i].x,edge.R[i].y);
+      ctx.stroke();
+
+      for(let i=0;i<groove.C.length;i+=1){
+        const p=groove.C[i];
+        if(Math.random()>0.55)continue;
+        const ph=(scroll*3+i*0.7)%1;
+        ctx.fillStyle=`rgba(160,230,255,${0.08+ph*0.2})`;
+        ctx.beginPath();ctx.ellipse(p.x,p.y+2,p.sm*4,p.sm*1.2,0,0,Math.PI*2);ctx.fill();
+      }
+      ctx.beginPath();ctx.moveTo(groove.C[0].x,groove.C[0].y);
+      for(let i=1;i<groove.C.length;i++)ctx.lineTo(groove.C[i].x,groove.C[i].y);
+      ctx.strokeStyle='rgba(180,240,255,0.55)';ctx.lineWidth=1.8;ctx.lineCap='round';ctx.stroke();
+      ctx.strokeStyle='rgba(100,200,240,0.2)';ctx.lineWidth=5;ctx.stroke();
+    }
+
+    function drawApexGate(pt,hit,approach){
+      const r=(6+pt.sm*14)*(1+approach*0.4);
+      const rot=performance.now()*0.003;
+      ctx.save();ctx.translate(pt.x,pt.y);ctx.rotate(rot*(hit?2:0.6));
+      for(let ring=0;ring<3;ring++){
+        const rr=r*(1+ring*0.35);
+        ctx.strokeStyle=hit?`rgba(200,255,255,${0.9-ring*0.2})`:`rgba(80,200,240,${0.55-ring*0.12})`;
+        ctx.lineWidth=hit?2.5-ring*0.4:1.4-ring*0.2;
+        ctx.beginPath();ctx.ellipse(0,0,rr,rr*0.38,0,0,Math.PI*2);ctx.stroke();
+      }
+      const vg=ctx.createRadialGradient(0,0,0,0,0,r*0.6);
+      vg.addColorStop(0,'rgba(220,250,255,0.9)');vg.addColorStop(0.5,'rgba(60,180,220,0.35)');vg.addColorStop(1,'rgba(20,80,120,0)');
+      ctx.fillStyle=vg;ctx.beginPath();ctx.arc(0,0,r*0.5,0,Math.PI*2);ctx.fill();
+      if(hit){
+        for(let i=0;i<8;i++){
+          const a=i/8*Math.PI*2;
+          ctx.strokeStyle='rgba(200,255,255,0.5)';
+          ctx.lineWidth=1;
+          ctx.beginPath();ctx.moveTo(Math.cos(a)*r*0.3,Math.sin(a)*r*0.12);ctx.lineTo(Math.cos(a)*r*1.2,Math.sin(a)*r*0.5);ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    function spawnFish(scroll,side){
+      const s=lineAtBeat(scroll);
+      const p=proj(s.x+(side>0?0.55:-0.55),s.y*0.5,0.8+Math.random()*4);
+      fishPool.push({x:p.x+(side>0?W*0.35:-W*0.35),y:p.y+(Math.random()-0.5)*40,
+        tx:p.x+(side>0?30:-30),ty:p.y,vx:0,vy:0,life:1,side,sz:1+Math.random()*2});
+    }
+
+    function drawFishInterlude(scroll,rest){
+      const scatter=rest<1.5;
+      const alpha=scatter?Math.max(0,1-rest/1.5):Math.min(1,(rest-1)/2);
+      if(!scatter&&alpha<0.05)return;
+      if(!scatter&&fishPool.length<120&&Math.random()>0.4)spawnFish(scroll,Math.random()>0.5?1:-1);
+      for(let i=fishPool.length-1;i>=0;i--){
+        const f=fishPool[i];
+        if(scatter){f.tx+=(f.side>0?1:-1)*8;f.life-=0.025;}
+        else{
+          f.tx=CX+(f.side>0?NEAR_X_HALF*0.7:-NEAR_X_HALF*0.7)+Math.sin(scroll*2+i)*12;
+          f.ty=CY-20+Math.sin(i*0.3+scroll)*25;
+        }
+        f.vx+=(f.tx-f.x)*0.06;f.vy+=(f.ty-f.y)*0.06;
+        f.x+=f.vx;f.y+=f.vy;f.vx*=0.88;f.vy*=0.88;
+        if(scatter)f.life-=0.01;
+        if(f.life<=0){fishPool.splice(i,1);continue;}
+        const a=alpha*f.life*0.7;
+        ctx.fillStyle=`rgba(200,215,230,${a})`;
+        ctx.beginPath();ctx.ellipse(f.x,f.y,f.sz*3,f.sz,0,0,Math.PI*2);ctx.fill();
+        ctx.fillStyle=`rgba(240,248,255,${a*0.6})`;
+        ctx.beginPath();ctx.ellipse(f.x-f.sz*2,f.y,f.sz,f.sz*0.5,0,0,Math.PI*2);ctx.fill();
+      }
+    }
+
+    function drawSpeedLines(intense,shake){
+      if(intense<0.15)return;
+      while(speedLines.length<24)speedLines.push({x:Math.random()*W,y:Math.random()*H,len:20+Math.random()*60});
+      ctx.strokeStyle=`rgba(220,240,255,${intense*0.35})`;
+      ctx.lineWidth=1.5;
+      speedLines.forEach(sl=>{
+        sl.y+=4+intense*12;sl.x+=(Math.random()-0.5)*2;
+        if(sl.y>H)sl.y=0;
+        const ang=0.15+shake*0.1;
+        ctx.beginPath();ctx.moveTo(sl.x,sl.y);ctx.lineTo(sl.x+sl.len*ang,sl.y+sl.len);ctx.stroke();
+      });
+    }
+
+    function drawPenguin(x,y,roll,stunt,kind){
+      ctx.save();ctx.translate(x,y);ctx.rotate(roll);
+      const sc=1.1+stunt*0.15;
+      ctx.scale(sc,sc);
+      if(stunt>0.1){
+        if(kind===0){ctx.rotate(-stunt*0.8);} // 侧身压弯
+        else if(kind===1){ctx.scale(1+stunt*0.3,1-stunt*0.1);} // 展翅加速
+        else{ctx.rotate(Math.sin(stunt*12)*0.4);} // 翻滚
+      }
+      ctx.font='38px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText('🐧',0,0);
+      if(stunt>0.2){
+        ctx.strokeStyle=`rgba(200,240,255,${stunt*0.6})`;ctx.lineWidth=2;
+        for(let i=0;i<5;i++){
+          const a=-0.8+i*0.4;
+          ctx.beginPath();ctx.moveTo(-20,5);ctx.quadraticCurveTo(-40-i*8,10+i*6,-55-i*12,20+i*10);ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    let t0=performance.now(),camZoom=1,camShake=0;
+    function frame(now){
+      const dt=Math.min(0.05,(now-t0)*0.001);t0=now;
+      const scroll=(now*0.001)/BEAT_SEC;
+      const frac=scroll-Math.floor(scroll);
+      const beat=Math.floor(scroll);
+      const ph=phaseAt(scroll);
+
+      if(beat!==lastBeat){
+        if(nodeAt(beat).type==='apex'&&frac<0.15)stuntT=Math.max(stuntT,0.6);
+        if(nodeAt(beat).type==='rest')combo=Math.max(0,combo-1);
+        lastBeat=beat;
+      }
+      stuntT=Math.max(0,stuntT-dt*2.5);
+      lx+=(tgtLx-lx)*Math.min(1,dt*12);
+
+      const targetZoom=ph.rest?0.78:0.92+ph.intense*0.22;
+      camZoom+=(targetZoom-camZoom)*Math.min(1,dt*5);
+      camShake+=(ph.intense*(0.3+combo*0.04)-camShake)*Math.min(1,dt*8);
+
+      const shakeX=(Math.random()-0.5)*camShake*6;
+      const shakeY=(Math.random()-0.5)*camShake*4;
+
+      drawRift();
+
+      ctx.save();
+      const pengLine=lineAtBeat(scroll);
+      const pengPt=proj(pengLine.x+lx*0.12,pengLine.y,0);
+      const camX=CX-(pengPt.x-CX)*(camZoom-0.85);
+      const camY=CY-(pengPt.y-CY)*(camZoom-0.85)*0.6;
+      ctx.translate(camX+shakeX,camY+shakeY);
+      ctx.scale(camZoom,camZoom);
+      ctx.translate(-camX,-camY);
+
+      const linePts=sampleLine(scroll,0.3,Z_FAR,100);
+      drawCarvedLine(linePts,scroll);
+
+      let restRun=0;
+      for(let b=beat;b<beat+6;b++){if(isRestBeat(b))restRun++;else break;}
+      drawFishInterlude(scroll,restRun+frac);
+
+      for(let b=Math.ceil(scroll)-1;b<scroll+Z_FAR;b++){
+        const z=b-scroll;
+        if(z<0||z>Z_FAR)continue;
+        const nd=nodeAt(b);
+        if(nd.type!=='apex')continue;
+        const s=lineAtBeat(b);
+        const pt=proj(s.x,s.y,z);
+        const hit=z<0.08;
+        const approach=Math.max(0,1-z/3);
+        drawApexGate(pt,hit,approach);
+      }
+
+      const roll=(tgtLx-lx)*0.4+Math.sin(scroll*4)*0.05;
+      drawPenguin(pengPt.x,pengPt.y-8,roll,stuntT,stuntKind);
+
+      drawSpeedLines(ph.intense+camShake*0.5,camShake);
+      ctx.restore();
+
+      const label=ph.rest?'呼—— 鱼群尾流滑翔':'咚·咚 — Apex 压弯';
+      ctx.fillStyle='rgba(140,190,220,0.65)';ctx.font='9px sans-serif';ctx.textAlign='center';
+      ctx.fillText(label,CX,H-6);
+      ctx.fillStyle='rgba(100,150,180,0.45)';ctx.font='8px sans-serif';
+      ctx.fillText(`GoPro z=${camZoom.toFixed(2)} · combo ${combo}`,CX,H-18);
+
+      requestAnimationFrame(frame);
+    }
+
+    canvas.addEventListener('pointermove',e=>{
+      const r=canvas.getBoundingClientRect();
+      const x=(e.clientX-r.left)*(W/r.width);
+      tgtLx=Math.max(-1,Math.min(1,(x-CX)/NEAR_X_HALF));
+    });
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

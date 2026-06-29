@@ -27,6 +27,9 @@ export class HorizonLayer {
   private viewport: ViewportContext
   /** Latest time-of-day, defaults to noon so headless tests still work. */
   private nightPhase = 0
+  /** Run depth 0..1 — fades coastline into open ocean as stages climb. */
+  private depthMood = 0
+  private worldScroll = 0
 
   private farOffset = 0
   private nearOffset = 0
@@ -61,13 +64,20 @@ export class HorizonLayer {
     this.nightPhase = snapshot.nightPhase
   }
 
-  update(dtSeconds: number, weather: WeatherSnapshot): void {
+  setDepthMood(t: number): void {
+    this.depthMood = Math.max(0, Math.min(1, t))
+  }
+
+  setWorldScroll(px: number): void {
+    this.worldScroll = Math.max(0, px)
+  }
+
+  update(dtSeconds: number, weather: WeatherSnapshot, sailMul = 1): void {
     this.elapsed += dtSeconds
-    // The boat is sailing — coastline drifts left. Speed mildly
-    // proportional to wind so storm runs feel faster.
-    const baseSpeed = 12 + weather.windPush * 0.05
-    this.farOffset += baseSpeed * 0.4 * dtSeconds
-    this.nearOffset += baseSpeed * dtSeconds
+    // Coastline scrolls with sailed distance so forward motion reads clearly.
+    const baseSpeed = (28 + weather.windPush * 0.12) * sailMul
+    this.farOffset = this.worldScroll * 0.1 + this.elapsed * baseSpeed * 0.25
+    this.nearOffset = this.worldScroll * 0.26 + this.elapsed * baseSpeed * 0.55
 
     this.drawRidge(this.farRidge, this.farOffset, true, weather)
     this.drawRidge(this.nearRidge, this.nearOffset, false, weather)
@@ -85,7 +95,8 @@ export class HorizonLayer {
     // Stylised mountain silhouette — a series of triangular peaks with
     // wobble. We render across [-200, width+200] for clean wrap.
     const baseY = waterLineY - (far ? 6 : -2)
-    const peakHeight = far ? 28 : 46
+    const depthFade = 1 - this.depthMood * 0.92
+    const peakHeight = (far ? 28 : 46) * depthFade + (far ? 8 : 14) * (1 - depthFade)
     const peakSpacing = far ? 90 : 70
     // Day palette is bright wash / green land; night palette is deep
     // navy. We mix between them based on nightPhase.
@@ -96,7 +107,8 @@ export class HorizonLayer {
     const wash = colorMix(dayWash, nightWash, this.nightPhase)
     const land = colorMix(dayLand, nightLand, this.nightPhase)
     const color = far ? wash : land
-    const alpha = far ? 0.55 : 0.85
+    const alpha = (far ? 0.55 : 0.85) * depthFade
+    if (alpha < 0.03) return
     const span = width + 400
     const totalPeaks = Math.ceil(span / peakSpacing) + 2
     // Bottom of the polygon hugs the waterline (+4 px bleed only) so
@@ -146,6 +158,8 @@ export class HorizonLayer {
     if (this.timeSinceIsland > this.nextIslandEverySec) {
       this.timeSinceIsland = 0
       this.nextIslandEverySec = 22 + Math.random() * 30
+      // Open ocean stages lose the coastal islands entirely.
+      if (this.depthMood < 0.72 && Math.random() > this.depthMood * 0.85) {
       // Weighted kind pick: palm 50%, rock 38%, lighthouse 12%.
       // Lighthouse is the rarest because it's the most recognisable
       // landmark — too frequent and the world feels small.
@@ -167,6 +181,7 @@ export class HorizonLayer {
         kind,
         phase: Math.random() * Math.PI * 2,
       })
+      }
     }
     for (const isl of this.liveIslands) {
       isl.x += isl.speed * dtSeconds

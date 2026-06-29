@@ -25,6 +25,24 @@ interface BubbleTrail {
  */
 export type HookMode = 'idle' | 'flight' | 'water' | 'hover' | 'fight'
 
+export type LineCueKind = 'none' | 'tugFish' | 'tugPull' | 'strike'
+
+export interface LineCueState {
+  kind: LineCueKind
+  /** Active exchange index during tug (0-based). */
+  exchange?: number
+  total?: number
+  results?: Array<'none' | 'good' | 'miss'>
+  /** Strike urgency 0..1 — drives pulse size. */
+  urgency?: number
+}
+
+interface LineGeometry {
+  midX: number
+  midY: number
+  len: number
+}
+
 export class Hook {
   readonly container = new Container()
 
@@ -38,6 +56,7 @@ export class Hook {
   rodTipY = 0
 
   private readonly line = new Graphics()
+  private readonly lineCues = new Graphics()
   private readonly sinker = new Graphics()
   private readonly bait = new Graphics()
   private readonly splash = new Graphics()
@@ -60,8 +79,11 @@ export class Hook {
   fightOffsetX = 0
   fightOffsetY = 0
 
+  private lineCue: LineCueState = { kind: 'none' }
+  private cuePulse = 0
+
   constructor() {
-    this.container.addChild(this.line, this.sinker, this.bait, this.bubbles, this.splash)
+    this.container.addChild(this.line, this.lineCues, this.sinker, this.bait, this.bubbles, this.splash)
     this.splash.alpha = 0
     this.draw()
   }
@@ -83,6 +105,16 @@ export class Hook {
     this.lineTension = Math.max(0, Math.min(1, amount))
   }
 
+  /** Cues drawn along the fishing line (tug arrows, strike prompt, …). */
+  setLineCue(cue: LineCueState): void {
+    this.lineCue = cue
+    if (cue.kind === 'none') this.lineCues.clear()
+  }
+
+  clearLineCue(): void {
+    this.setLineCue({ kind: 'none' })
+  }
+
   getMode(): HookMode {
     return this.mode
   }
@@ -100,6 +132,8 @@ export class Hook {
     this.trail.length = 0
     this.bubbles.clear()
     this.lineTension = 0
+    this.lineCue = { kind: 'none' }
+    this.lineCues.clear()
     this.mode = 'idle'
   }
 
@@ -118,9 +152,16 @@ export class Hook {
   twitchUp(amount: number): void {
     if (this.mode === 'water' || this.mode === 'hover') {
       this.vy -= amount
-      // Clamp upward speed so a spammed reel doesn't yank the hook out of water
       const maxUp = -160
       if (this.vy < maxUp) this.vy = maxUp
+    }
+  }
+
+  /** Fish yanks the line downward during the tug-of-war lure phase. */
+  twitchDown(amount: number): void {
+    if (this.mode === 'water' || this.mode === 'hover') {
+      this.vy += amount
+      if (this.vy > 120) this.vy = 120
     }
   }
 
@@ -189,10 +230,14 @@ export class Hook {
       }
     }
 
+    this.cuePulse += dtSeconds * 5
+
     // Update trail / drawing
     this.advanceTrail(dtSeconds)
     this.draw()
-    this.drawLine()
+    const geom = this.computeLineGeometry()
+    this.drawLine(geom)
+    this.drawLineCues(geom)
     if (this.splashTimer > 0) {
       this.splashTimer -= dtSeconds
       this.drawSplash(viewport)
@@ -255,20 +300,14 @@ export class Hook {
     b.fill(0xff6b6b)
   }
 
-  private drawLine(): void {
-    const g = this.line
-    g.clear()
+  private computeLineGeometry(): LineGeometry {
     const dx = this.x - this.rodTipX
     const dy = this.y - this.rodTipY
     const len = Math.hypot(dx, dy)
-    // Slack sag curve via quadratic through a dropped midpoint. Tension
-    // pulls the sag out so the line snaps progressively straight.
     const baseSag = Math.min(40, len * 0.08 + 6)
     const sag = baseSag * (1 - this.lineTension * 0.85)
     let midX = (this.rodTipX + this.x) / 2
     let midY = (this.rodTipY + this.y) / 2 + sag
-    // Twang: when taut, vibrate the control point PERPENDICULAR to the
-    // line so it reads as a plucked string shuddering under load.
     if (this.lineTension > 0.05 && len > 1) {
       const perpX = -dy / len
       const perpY = dx / len
@@ -276,12 +315,121 @@ export class Hook {
       midX += perpX * twang
       midY += perpY * twang
     }
+    return { midX, midY, len }
+  }
+
+  private sampleLine(t: number, geom: LineGeometry): { x: number; y: number; angle: number } {
+    const u = 1 - t
+    const x =
+      u * u * this.rodTipX + 2 * u * t * geom.midX + t * t * this.x
+    const y =
+      u * u * this.rodTipY + 2 * u * t * geom.midY + t * t * this.y
+    const tx =
+      2 * u * (geom.midX - this.rodTipX) + 2 * t * (this.x - geom.midX)
+    const ty =
+      2 * u * (geom.midY - this.rodTipY) + 2 * t * (this.y - geom.midY)
+    const angle = Math.atan2(ty, tx)
+    return { x, y, angle }
+  }
+
+  private drawLine(geom: LineGeometry): void {
+    const g = this.line
+    g.clear()
+    if (geom.len < 2) return
     g.moveTo(this.rodTipX, this.rodTipY)
-    g.quadraticCurveTo(midX, midY, this.x, this.y)
-    // Taut line reads brighter + a touch thicker, like it's straining.
+    g.quadraticCurveTo(geom.midX, geom.midY, this.x, this.y)
     const width = 1.2 + this.lineTension * 0.8
     const alpha = 0.6 + this.lineTension * 0.35
     g.stroke({ color: 0xffffff, width, alpha })
+  }
+
+  private drawLineCues(geom: LineGeometry): void {
+    const g = this.lineCues
+    g.clear()
+    if (this.lineCue.kind === 'none' || geom.len < 12) return
+
+    const pulse = (Math.sin(this.cuePulse) + 1) * 0.5
+    const { kind } = this.lineCue
+
+    if (kind === 'tugFish' || kind === 'tugPull') {
+      const total = this.lineCue.total ?? 3
+      const exchange = this.lineCue.exchange ?? 0
+      const results = this.lineCue.results ?? []
+      for (let i = 0; i < total; i += 1) {
+        const t = 0.22 + (i / Math.max(1, total - 1)) * 0.56
+        const pt = this.sampleLine(t, geom)
+        const result = results[i] ?? 'none'
+        const isActive = i === exchange
+        let color = 0x335577
+        let alpha = 0.45
+        let radius = 5
+        if (result === 'good') {
+          color = 0x6ee06e
+          alpha = 0.95
+        } else if (result === 'miss') {
+          color = 0xff6b6b
+          alpha = 0.9
+        } else if (isActive) {
+          color = kind === 'tugPull' ? 0xffd166 : 0x9fe6ff
+          alpha = 0.95
+          radius = 7 + pulse * 3
+        }
+        g.circle(pt.x, pt.y, radius)
+        g.fill({ color, alpha })
+      }
+      const arrowT = kind === 'tugFish' ? 0.58 : 0.42
+      const pt = this.sampleLine(arrowT, geom)
+      const alongHook = pt.angle
+      const towardRod = pt.angle + Math.PI
+      this.drawLineArrow(
+        g,
+        pt.x,
+        pt.y,
+        kind === 'tugFish' ? alongHook : towardRod,
+        22 + pulse * 8,
+        kind === 'tugPull' ? 0xffd166 : 0x9fe6ff,
+        0.9,
+      )
+    } else if (kind === 'strike') {
+      const urgency = this.lineCue.urgency ?? 0
+      const arrowT = 0.38 + pulse * 0.04
+      const pt = this.sampleLine(arrowT, geom)
+      const size = 26 + urgency * 14 + pulse * 6
+      this.drawLineArrow(g, pt.x, pt.y, pt.angle + Math.PI, size, 0xffd166, 0.85 + urgency * 0.15)
+      const ex = this.sampleLine(0.62, geom)
+      const marks = urgency < 0.35 ? '!' : urgency < 0.65 ? '!!' : '!!!'
+      for (let i = 0; i < marks.length; i += 1) {
+        const ox = (i - (marks.length - 1) / 2) * 10
+        g.roundRect(ex.x + ox - 3, ex.y - 14, 6, 14, 2)
+        g.fill({ color: 0xff6b6b, alpha: 0.75 + pulse * 0.2 })
+      }
+    }
+  }
+
+  private drawLineArrow(
+    g: Graphics,
+    cx: number,
+    cy: number,
+    angle: number,
+    size: number,
+    color: number,
+    alpha: number,
+  ): void {
+    const half = size * 0.5
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    const tipX = cx + cos * half
+    const tipY = cy + sin * half
+    const baseX = cx - cos * half * 0.5
+    const baseY = cy - sin * half * 0.5
+    const wing = half * 0.55
+    const lx = baseX + (-sin) * wing
+    const ly = baseY + cos * wing
+    const rx = baseX - (-sin) * wing
+    const ry = baseY - cos * wing
+    g.poly([tipX, tipY, lx, ly, rx, ry])
+    g.fill({ color, alpha })
+    g.stroke({ color: 0x000000, width: 2, alpha: alpha * 0.45 })
   }
 
   private drawSplash(viewport: ViewportContext): void {

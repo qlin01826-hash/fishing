@@ -5,7 +5,7 @@ import type { FishingStateId } from '../types'
 import { FISHING_CONSTANTS } from '../types'
 import type { AmbientFish } from '../entities/FishSchool'
 import { BattleState } from './BattleState'
-import { WaitingState } from './WaitingState'
+import { SailingState } from './SailingState'
 
 interface HookedPayload {
   ambient?: { fish: AmbientFish; def: unknown } | null
@@ -37,7 +37,8 @@ export class HookedState implements IFishingState {
         : null
     this.elapsedMs = 0
     this.ctx.reelButtons.setVisible(false)
-    this.ctx.eventOverlay.showStrike()
+    this.ctx.eventOverlay.hide()
+    this.ctx.hook.setLineCue({ kind: 'strike', urgency: 0 })
     this.ctx.audio.playBiteAlert()
     // Penguin reaction: wide-eyed surprise the instant the bite hits.
     // The transient mood is restored to whatever SailingState picks on
@@ -61,11 +62,7 @@ export class HookedState implements IFishingState {
 
     // Make the strike text bigger as time runs out (urgency)
     const ratio = Math.min(1, this.elapsedMs / FISHING_CONSTANTS.strike_window_ms)
-    const exclam = ratio < 0.3 ? '!' : ratio < 0.6 ? '!!' : '!!!'
-    // Replace the static prompt with rising tension (only when no swipe attempted yet)
-    if (!this.ctx.pointer.active) {
-      this.ctx.eventOverlay.showMessage(t('game.biteHint') + ' ' + exclam, '#ffd166')
-    }
+    this.ctx.hook.setLineCue({ kind: 'strike', urgency: ratio })
 
     if (this.elapsedMs > FISHING_CONSTANTS.strike_window_ms) {
       this.fail()
@@ -96,6 +93,7 @@ export class HookedState implements IFishingState {
   }
 
   exit(): void {
+    this.ctx.hook.clearLineCue()
     this.ctx.eventOverlay.hide()
   }
 
@@ -106,15 +104,12 @@ export class HookedState implements IFishingState {
 
   private fail(): void {
     this.ctx.audio.playFail()
-    // Use the penguin bubble (which persists across state transitions
-    // unlike the event overlay that hides on exit()) so the player
-    // actually gets to read the "fish got away" feedback.
     this.ctx.penguin.showMessage(t('game.missedHint'), 'sad', 1800)
     if (this.ambient) {
       this.ctx.fishSchool.remove(this.ambient)
     }
     this.ctx.activeBiter = null
-    this.ctx.hook.setMode('hover')
-    this.ctx.goTo(new WaitingState(this.ctx))
+    this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)
+    this.ctx.goTo(new SailingState(this.ctx))
   }
 }

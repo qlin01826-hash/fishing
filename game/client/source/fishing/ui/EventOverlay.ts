@@ -28,7 +28,7 @@ export class EventOverlay {
   private readonly ring = new Graphics()
   private readonly progressArc = new Graphics()
 
-  private mode: 'idle' | 'follow' | 'run' | 'strike' | 'message' | 'lure' = 'idle'
+  private mode: 'idle' | 'follow' | 'run' | 'strike' | 'message' | 'lure' | 'tug' = 'idle'
   private pulsePhase = 0
   /** Position of the highlighted fish, used for the follow ring. */
   ringX = 0
@@ -41,6 +41,10 @@ export class EventOverlay {
   private lurePhase: 'call' | 'listen' = 'call'
   private lureActiveBeat = -1
   private lureEchoes: Array<'none' | 'good' | 'miss'> = []
+  private tugExchange = 0
+  private tugTotal = 3
+  private tugPhase: 'fish' | 'player' = 'fish'
+  private tugResults: Array<'none' | 'good' | 'miss'> = []
   /** Center of the screen (for big text). */
   private centerX = 0
   private centerY = 0
@@ -143,6 +147,35 @@ export class EventOverlay {
     this.bigText.style.fill = headlineColor
   }
 
+  showTug(totalExchanges = 3): void {
+    this.mode = 'tug'
+    this.tugTotal = totalExchanges
+    this.tugExchange = 0
+    this.tugPhase = 'fish'
+    this.tugResults = []
+    this.arrow.clear()
+    this.ring.clear()
+    this.progressArc.clear()
+  }
+
+  setTugState(
+    exchange: number,
+    phase: 'fish' | 'player',
+    results: Array<'none' | 'good' | 'miss'>,
+    headline: string,
+    subline: string,
+  ): void {
+    if (this.mode !== 'tug') return
+    this.tugExchange = exchange
+    this.tugPhase = phase
+    this.tugResults = results
+    this.bigText.text = headline
+    this.bigText.style.fill = phase === 'player' ? '#ffd166' : '#9fe6ff'
+    this.subText.text = subline
+    this.bigText.position.set(this.centerX, this.headlineY)
+    this.subText.position.set(this.centerX, this.headlineY + 36)
+  }
+
   showStrike(): void {
     this.mode = 'strike'
     this.bigText.text = t('game.biteHint')
@@ -230,6 +263,8 @@ export class EventOverlay {
       this.bigText.scale.set(1 + pulse * 0.15)
     } else if (this.mode === 'lure') {
       this.drawLure(pulse)
+    } else if (this.mode === 'tug') {
+      this.drawTug(pulse)
     } else {
       this.bigText.scale.set(1)
     }
@@ -284,6 +319,44 @@ export class EventOverlay {
     }
     this.bigText.position.set(this.centerX, this.centerY - 46)
     this.bigText.scale.set(1 + pulse * 0.06)
+  }
+
+  private drawTug(pulse: number): void {
+    const g = this.ring
+    g.clear()
+    this.arrow.clear()
+    const spacing = 52
+    const totalW = (this.tugTotal - 1) * spacing
+    const startX = this.centerX - totalW / 2
+    const y = this.centerY + 20
+    for (let i = 0; i < this.tugTotal; i += 1) {
+      const x = startX + i * spacing
+      const result = this.tugResults[i] ?? 'none'
+      const isActive = i === this.tugExchange
+      let color = 0x335577
+      let alpha = 0.35
+      if (result === 'good') {
+        color = 0x6ee06e
+        alpha = 1
+      } else if (result === 'miss') {
+        color = 0xff6b6b
+        alpha = 0.9
+      } else if (isActive) {
+        color = this.tugPhase === 'player' ? 0xffd166 : 0x9fe6ff
+        alpha = 0.95
+      }
+      g.circle(x, y, isActive ? 16 + pulse * 4 : 12)
+      g.fill({ color, alpha })
+      g.moveTo(x, y - 18)
+      g.lineTo(x, y + 18)
+      g.stroke({ color, width: 2, alpha: alpha * 0.7 })
+    }
+    if (this.tugPhase === 'fish') {
+      this.drawArrow('down')
+    } else {
+      this.drawArrow('up')
+    }
+    this.bigText.scale.set(1 + pulse * 0.08)
   }
 
   private drawArrow(direction: Direction): void {
