@@ -60,6 +60,12 @@ export class Transform3D {
 
   fovDeg = Transform3D.FOV_DEG
   focalLength = 300
+  /**
+   * Runtime focal multiplier for the "turbo" wide-angle juice (1 = calibrated
+   * FOV; <1 widens the lens / stretches the tunnel). Kept small so the Z=0
+   * judge anchor barely moves and finger tracking never drops.
+   */
+  focalScale = 1
   cameraY = Transform3D.CAMERA_Y
   cameraZ = Transform3D.CAMERA_Z
   pitchRad = Transform3D.PITCH_DEG * DEG
@@ -235,7 +241,7 @@ export class Transform3D {
     worldZ: number,
     dyn: CameraDynamics = Transform3D.IDENTITY_DYNAMICS,
   ): ProjectedPoint | null {
-    const focalLength = this.focalLength
+    const focalLength = this.focalLength * this.focalScale
     const cx = this.canvasWidth * 0.5
     const cy = this.canvasHeight * this.vanishingPointYRatio
 

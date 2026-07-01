@@ -19,7 +19,7 @@ const PACK_V1_ASSET_URLS = import.meta.glob(
 ) as Record<string, string>
 
 function basename(path: string): string {
-  const normalized = path.replaceAll('\\', '/')
+  const normalized = path.split('\\').join('/')
   const idx = normalized.lastIndexOf('/')
   return idx >= 0 ? normalized.slice(idx + 1) : normalized
 }
@@ -30,6 +30,13 @@ const PACK_V1_BUILD = 'build-prechorus-8bar.mp3'
 const PACK_V1_CHORUS = 'chorus-8bar.mp3'
 const PACK_V1_RISE = 'rise-fill-1bar.mp3'
 const PACK_V1_DROP = 'drop-fill-1bar.mp3'
+const PACK_V1_REQUIRED_TRACKS = [
+  PACK_V1_BED,
+  PACK_V1_BUILD,
+  PACK_V1_CHORUS,
+  PACK_V1_RISE,
+  PACK_V1_DROP,
+] as const
 
 function normalizePackBpm(parsedBpm: number, expectedBpm: number): number {
   if (!Number.isFinite(parsedBpm) || parsedBpm <= 0) return expectedBpm
@@ -148,6 +155,7 @@ export class AudioSystem {
   private readonly packV1Gains = new Map<string, GainNode>()
   private packV1Loaded = false
   private packV1Loading = false
+  private packV1Unavailable = false
   private packV1Started = false
   private packV1StartTime = 0
   private packV1Analysis: MusicAnalysis | null = null
@@ -286,6 +294,11 @@ export class AudioSystem {
     this.packV1Loading = true
     try {
       const tracks = this.listPackV1Tracks()
+      const hasRequiredTracks = PACK_V1_REQUIRED_TRACKS.every((name) => Boolean(tracks[name]))
+      if (!hasRequiredTracks) {
+        this.packV1Unavailable = true
+        return
+      }
       const promises = Object.entries(tracks).map(async ([name, url]) => {
         if (!url) return
         try {
@@ -306,9 +319,10 @@ export class AudioSystem {
 
       this.analyzePackV1Timing()
 
-      // If we loaded files successfully (all 5 stems must be decoded), mark packV1 as loaded and use the parsed beat grid.
-      if (this.packV1Buffers.size === 5) {
+      // If we loaded files successfully (all required stems must be decoded), mark packV1 as loaded and use the parsed beat grid.
+      if (PACK_V1_REQUIRED_TRACKS.every((name) => this.packV1Buffers.has(name))) {
         this.packV1Loaded = true
+        this.packV1Unavailable = false
         if (this.beatClock) {
           this.beatClock.setBpm(this.packV1Bpm)
           this.resyncScheduler()
@@ -318,9 +332,18 @@ export class AudioSystem {
         if (this.drumsActive) {
           this.transitionToPackV1()
         }
+      } else {
+        this.packV1Unavailable = true
+        if (this.drumsActive) {
+          this.applySectionGains(this.currentSection, 0.45)
+        }
       }
     } catch (err) {
+      this.packV1Unavailable = true
       console.error("Error loading pack-v1", err)
+      if (this.drumsActive) {
+        this.applySectionGains(this.currentSection, 0.45)
+      }
     } finally {
       this.packV1Loading = false
     }
@@ -522,12 +545,16 @@ export class AudioSystem {
     this.keyOffsetSemis = 0
     this.consecutiveChorusBumps = 0
     this.motifIndex = 0
+    // Always start the synthesized bed immediately so there is never a
+    // silent gap. When the authored pack finishes decoding we crossfade
+    // to it (seamless swap) — on slow/mobile loads the player still hears
+    // music from the first beat instead of waiting on a multi-MB decode.
     this.applySectionGains(this.currentSection, 0.45)
-    
+
     if (this.packV1Loaded) {
-      this.startPackV1Loop(this.ctx.currentTime + 0.05)
+      this.transitionToPackV1()
     }
-    
+
     this.schedulerHandle = window.setInterval(() => this.tickDrumScheduler(), 25)
   }
 
@@ -1045,8 +1072,9 @@ export class AudioSystem {
     
     this.sectionBeatsElapsed += 1
 
-    // If high-quality stems are playing, we skip all synthetic sound generation!
-    if (this.packV1Loaded && this.packV1Started) {
+    // If the authored pack is present, never let the synthesized fallback
+    // become the audible soundtrack while the pack is still decoding.
+    if (this.packV1Started) {
       return
     }
 

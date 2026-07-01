@@ -8,6 +8,7 @@ export type LureDirection = 'left' | 'right'
 interface PadPointer {
   pointerId: number
   startX: number
+  lastX: number
   dir: LureDirection | null
 }
 
@@ -22,6 +23,7 @@ interface PadSide {
   cy: number
   radius: number
   swipeDir: LureDirection | null
+  swipeTimeMs: number | null
   active: boolean
   flash: number
 }
@@ -44,12 +46,14 @@ export class LurePads {
   private padPhase: 'idle' | 'preview' | 'hit' = 'idle'
   private listenActive = false
   private readonly pointers = new Map<number, PadPointer>()
-  private readonly swipeThreshold = 28
   private readonly keysDown = new Set<string>()
   private keyboardLatched = false
   private beatClock: BeatClock | null = null
+  private hitBeatTimeMs: number | null = null
   private readonly perfectWindowMs = 90
   private readonly goodWindowMs = 200
+  private readonly touchPerfectWindowMs = 120
+  private readonly touchGoodWindowMs = 280
 
   /** Fires when both pads swipe together; timing is scored like PullPanel. */
   onDualSwipe: (judgement: TapJudgement, dirOk: boolean) => void = () => {}
@@ -81,8 +85,12 @@ export class LurePads {
     if (!visible) {
       this.pointers.clear()
       this.keysDown.clear()
+      this.keyboardLatched = false
       this.listenActive = false
+      this.hitBeatTimeMs = null
       this.padPhase = 'idle'
+      this.left.swipeTimeMs = null
+      this.right.swipeTimeMs = null
     }
   }
 
@@ -90,6 +98,8 @@ export class LurePads {
     this.commandDir = dir
     this.left.swipeDir = null
     this.right.swipeDir = null
+    this.left.swipeTimeMs = null
+    this.right.swipeTimeMs = null
   }
 
   setProgress(current: number, target: number): void {
@@ -102,8 +112,11 @@ export class LurePads {
     this.padPhase = phase
     if (phase !== 'hit') {
       this.listenActive = false
+      this.hitBeatTimeMs = null
       this.left.swipeDir = null
       this.right.swipeDir = null
+      this.left.swipeTimeMs = null
+      this.right.swipeTimeMs = null
       this.left.active = false
       this.right.active = false
       this.pointers.clear()
@@ -113,10 +126,19 @@ export class LurePads {
   /** True on the hit beat — dual swipes are accepted and rhythm-scored. */
   setListenActive(active: boolean): void {
     this.listenActive = active
-    if (active) this.padPhase = 'hit'
+    if (active) {
+      this.padPhase = 'hit'
+      const now = performance.now()
+      this.hitBeatTimeMs =
+        this.beatClock?.started ? this.beatClock.perfTimeOfBeat(this.beatClock.nearestBeatIndex(now)) : now
+      this.tryResolveTouch()
+    }
     if (!active) {
+      this.hitBeatTimeMs = null
       this.left.swipeDir = null
       this.right.swipeDir = null
+      this.left.swipeTimeMs = null
+      this.right.swipeTimeMs = null
       this.left.active = false
       this.right.active = false
       this.pointers.clear()
@@ -133,6 +155,7 @@ export class LurePads {
     this.progress = 0
     this.progressTarget = 5
     this.keysDown.clear()
+    this.keyboardLatched = false
   }
 
   keyboardEvent(down: boolean, code: string): void {
@@ -165,7 +188,7 @@ export class LurePads {
       const pairWasd = this.keysDown.has('KeyD') && this.keysDown.has('KeyW')
       dirOk = pairD || pairWasd
     }
-    if (dirOk) this.emitSwipe(dirOk)
+    if (dirOk) this.emitSwipe(dirOk, performance.now(), 'keyboard')
   }
 
   update(dtSeconds: number, nowMs = performance.now()): void {
@@ -226,6 +249,7 @@ export class LurePads {
       cy: 0,
       radius: 60,
       swipeDir: null,
+      swipeTimeMs: null,
       active: false,
       flash: 0,
     }
@@ -238,7 +262,8 @@ export class LurePads {
     pad.container.position.set(cx, cy)
     pad.label.position.set(0, radius * 0.42)
     pad.hint.position.set(0, radius * 0.68)
-    pad.bg.hitArea = new Rectangle(-radius, -radius, radius * 2, radius * 2)
+    const hitRadius = radius * 1.28
+    pad.bg.hitArea = new Rectangle(-hitRadius, -hitRadius, hitRadius * 2, hitRadius * 2)
   }
 
   private attachPad(pad: PadSide, side: 'left' | 'right'): void {
@@ -252,7 +277,7 @@ export class LurePads {
   }
 
   private onPadDown(e: FederatedPointerEvent, side: 'left' | 'right'): void {
-    if (!this.listenActive) return
+    if (!this.canTrackTouch()) return
     e.stopPropagation()
     const pad = side === 'left' ? this.left : this.right
     pad.active = true
@@ -260,49 +285,75 @@ export class LurePads {
     this.pointers.set(e.pointerId, {
       pointerId: e.pointerId,
       startX: local.x,
+      lastX: local.x,
       dir: null,
     })
   }
 
   private onPadMove(e: FederatedPointerEvent, side: 'left' | 'right'): void {
-    if (!this.listenActive) return
+    if (!this.canTrackTouch()) return
     const rec = this.pointers.get(e.pointerId)
     if (!rec) return
-    const pad = side === 'left' ? this.left : this.right
-    const local = pad.container.toLocal(e.global)
-    const dx = local.x - rec.startX
-    if (Math.abs(dx) >= this.swipeThreshold) {
-      rec.dir = dx < 0 ? 'left' : 'right'
-      pad.swipeDir = rec.dir
-    }
+    this.recordPadMovement(e, side, rec)
     this.tryResolveTouch()
   }
 
   private onPadUp(e: FederatedPointerEvent, side: 'left' | 'right'): void {
     const pad = side === 'left' ? this.left : this.right
+    const rec = this.pointers.get(e.pointerId)
+    if (rec) {
+      this.recordPadMovement(e, side, rec)
+    }
     pad.active = false
     this.pointers.delete(e.pointerId)
     this.tryResolveTouch()
+  }
+
+  private canTrackTouch(): boolean {
+    return this.container.visible && (this.padPhase === 'preview' || this.padPhase === 'hit')
+  }
+
+  private swipeThresholdFor(pad: PadSide): number {
+    return Math.max(14, Math.min(24, pad.radius * 0.3))
+  }
+
+  private recordPadMovement(e: FederatedPointerEvent, side: 'left' | 'right', rec: PadPointer): void {
+    const pad = side === 'left' ? this.left : this.right
+    const local = pad.container.toLocal(e.global)
+    rec.lastX = local.x
+    const dx = rec.lastX - rec.startX
+    if (Math.abs(dx) < this.swipeThresholdFor(pad)) return
+    rec.dir = dx < 0 ? 'left' : 'right'
+    pad.swipeDir = rec.dir
+    pad.swipeTimeMs = performance.now()
   }
 
   private tryResolveTouch(): void {
     if (!this.listenActive) return
     const cmd = this.commandDir
     const dirOk = this.left.swipeDir === cmd && this.right.swipeDir === cmd
-    if (dirOk) this.emitSwipe(dirOk)
+    if (!dirOk) return
+    const swipeTimeMs = Math.max(
+      this.left.swipeTimeMs ?? performance.now(),
+      this.right.swipeTimeMs ?? performance.now(),
+    )
+    this.emitSwipe(dirOk, swipeTimeMs, 'touch')
   }
 
-  private judgeTiming(nowMs: number): TapJudgement {
+  private judgeTiming(nowMs: number, input: 'keyboard' | 'touch'): TapJudgement {
     if (!this.beatClock || !this.beatClock.started) return 'good'
-    const offset = Math.abs(this.beatClock.msFromNearestBeat(nowMs))
-    if (offset <= this.perfectWindowMs) return 'perfect'
-    if (offset <= this.goodWindowMs) return 'good'
+    const targetMs = this.hitBeatTimeMs ?? this.beatClock.perfTimeOfBeat(this.beatClock.nearestBeatIndex(nowMs))
+    const offset = Math.abs(nowMs - targetMs)
+    const perfectWindow = input === 'touch' ? this.touchPerfectWindowMs : this.perfectWindowMs
+    const goodWindow = input === 'touch' ? this.touchGoodWindowMs : this.goodWindowMs
+    if (offset <= perfectWindow) return 'perfect'
+    if (offset <= goodWindow) return 'good'
     return 'miss'
   }
 
-  private emitSwipe(dirOk: boolean): void {
+  private emitSwipe(dirOk: boolean, nowMs = performance.now(), input: 'keyboard' | 'touch' = 'keyboard'): void {
     if (!this.listenActive) return
-    const judgement = this.judgeTiming(performance.now())
+    const judgement = this.judgeTiming(nowMs, input)
     if (judgement !== 'miss' && dirOk) {
       this.left.flash = 1
       this.right.flash = 1
@@ -311,6 +362,8 @@ export class LurePads {
     this.onDualSwipe(judgement, dirOk)
     this.left.swipeDir = null
     this.right.swipeDir = null
+    this.left.swipeTimeMs = null
+    this.right.swipeTimeMs = null
     this.pointers.clear()
   }
 

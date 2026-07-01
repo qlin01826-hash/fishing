@@ -67,24 +67,31 @@ function clamp01(v: number): number {
 function buildProfile(index: number): StageProfile {
   const maxIndex = STAGE_COUNT - 1
   const tier = maxIndex > 0 ? index / maxIndex : 0
+  // Ease-in ramp for the *tightening* params (tempo, windows, reaction time,
+  // strictness): keeps the opening stages gentle and pushes the steep part of
+  // the curve toward the deep water, so difficulty doesn't spike on fish #1.
+  const rampT = Math.pow(tier, 1.6)
   const zone = Math.min(ZONE_NAMES.length - 1, Math.floor(index / STAGES_PER_ZONE))
   // Density cap climbs 1 → 3 across the run (chart patterns top out at
   // L3). Floor trails one tier behind so deep water never goes trivial.
-  const noteCap = Math.max(1, Math.min(3, Math.round(1 + tier * 2)))
+  // Eased so the cap holds at 1 for the first few catches before climbing.
+  const noteCap = Math.max(1, Math.min(3, Math.round(1 + rampT * 2)))
   const noteFloor = Math.max(0, noteCap - 1)
   return {
     index,
     tier,
     zone,
     name: ZONE_NAMES[zone],
-    bpmBase: Math.round(lerp(78, 140, tier)),
-    windowMul: lerp(1.45, 0.78, tier),
+    bpmBase: Math.round(lerp(72, 138, rampT)),
+    windowMul: lerp(1.55, 0.8, rampT),
     noteFloor,
     noteCap,
-    noteLookAheadBeats: lerp(2.5, 1.4, tier),
-    willpowerMul: lerp(0.8, 1.7, tier),
-    // Strictness floor stays 0 through the shallows, then ramps in.
-    strictnessFloor: Math.max(0, lerp(-0.2, 0.82, tier)),
+    noteLookAheadBeats: lerp(3.0, 1.45, rampT),
+    // Longer fights overall, with a much higher floor early so the first
+    // catches actually last and let the music breathe.
+    willpowerMul: lerp(1.25, 2.0, tier),
+    // Strictness floor stays 0 through the shallows, then ramps in (eased).
+    strictnessFloor: Math.max(0, lerp(-0.25, 0.82, rampT)),
     // Bright shallows still start at 0, but voyage now drives visuals from t=0.
     depthMood: clamp01((index - 1) / Math.max(1, maxIndex - 1)),
   }
@@ -192,6 +199,8 @@ export class ProgressionSystem {
   private legProgress = 0
   /** Cumulative world scroll in px — drives visible forward motion. */
   private worldScrollPx = 0
+  /** When true the voyage is anchored (hook dropped) — no scroll advance. */
+  private voyageFrozen = false
 
   /** Current voyage position 0..1 (advances while the boat is underway). */
   get voyage(): number {
@@ -216,18 +225,33 @@ export class ProgressionSystem {
    * pixels so the scene visibly leaves the beach within seconds.
    */
   updateVoyage(dtSeconds: number, underway: boolean, viewportWidth: number): void {
-    if (!underway) return
+    if (!underway || this.voyageFrozen) return
     const legSpan = 1 / Math.max(1, STAGE_COUNT - 1)
-    const legSpeed = 0.055
+    // Cruise pace cut to 30% of the old value so each sea zone lingers ~3× as
+    // long — the player has room to choose where to drop the hook.
+    const legSpeed = 0.0165
     this.legProgress = Math.min(0.98, this.legProgress + dtSeconds * legSpeed)
     const base = this.stageIndex / Math.max(1, STAGE_COUNT - 1)
     const legVoyage = Math.min(1, base + this.legProgress * legSpan)
 
     const runSpan = Math.max(400, viewportWidth * 4.5)
     const depthMul = 1 + this.stageIndex * 0.14 + legVoyage * 0.2
-    this.worldScrollPx += dtSeconds * 140 * depthMul
+    this.worldScrollPx += dtSeconds * 42 * depthMul
     const scrollVoyage = clamp01(this.worldScrollPx / runSpan)
     this.voyageProgress = Math.max(legVoyage, scrollVoyage)
+  }
+
+  /**
+   * Hard-freeze the voyage the instant the hook drops so the boat stays anchored
+   * in the exact sea zone the player chose (progress bar + scroll stop dead).
+   */
+  freezeVoyage(): void {
+    this.voyageFrozen = true
+  }
+
+  /** Release the anchor when a fresh sailing leg begins. */
+  unfreezeVoyage(): void {
+    this.voyageFrozen = false
   }
 
   /** Reset for a brand-new run. */
@@ -240,5 +264,6 @@ export class ProgressionSystem {
     this.voyageProgress = 0
     this.legProgress = 0
     this.worldScrollPx = 0
+    this.voyageFrozen = false
   }
 }

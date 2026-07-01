@@ -7,6 +7,8 @@ import type { AmbientFish } from '../entities/FishSchool'
 import type { TapJudgement } from '../ui/PullPanel'
 import { chaseProjectionForViewport } from '../battle/BattlePath'
 import { sectionForStage } from '../systems/AudioSystem'
+import { ArcaeaJudge, type Judgement } from '../battle/ArcaeaJudge'
+import { LANE_X, generateDemoTrack } from '../chase/DualLayerChart'
 import { CatchState } from './CatchState'
 import { SailingState } from './SailingState'
 
@@ -26,12 +28,19 @@ interface BattlePayload {
  *   holding inside the safe zone adds a slow background drain. Willpower
  *   at zero → catch.
  *
- * NoteLane and follow/run overlays are intentionally unused here so the
- * player reads one metronome, not two parallel rhythm games.
+ * NoteLane is used as the mobile-readable timing surface: notes travel
+ * into the fixed hit line at the PullPanel centre, while PullPanel remains
+ * the single input target for touch and keyboard.
  */
 /** Willpower chunk removed per on-beat tap (fraction of initial bar). */
-const WP_DRAIN_PERFECT = 0.075
-const WP_DRAIN_GOOD = 0.042
+const WP_DRAIN_PERFECT = 0.05
+const WP_DRAIN_GOOD = 0.03
+/**
+ * Sky-stream PURE ticks fire ~10×/sec while riding (every 100ms), so they MUST
+ * drain far less than a discrete beat tap or the fight ends in ~1s. At this
+ * rate a perfectly-held stream burns ~4%/sec — a meaningful but fair pace.
+ */
+const WP_DRAIN_SKY_TICK = 0.004
 
 export class BattleState implements IFishingState {
   readonly id: FishingStateId = 'battle'
@@ -62,7 +71,17 @@ export class BattleState implements IFishingState {
   /** Direction the struggle is pushing the tracker (-1 or +1). Re-rolled when struggle starts. */
   private struggleDir = 1
   /** Saved binding to remove the pull-panel listener on exit. */
-  private readonly pullListener: (j: TapJudgement, nowMs: number, beatPhase: number) => void
+  private readonly pullListener: (
+    j: TapJudgement,
+    nowMs: number,
+    beatPhase: number,
+    dir?: number,
+  ) => void
+
+  /** Arcaea judgement engine — drives floor notes + sky arc tracking. */
+  private judge: ArcaeaJudge | null = null
+  /** Previous combo value for pulse detection. */
+  private prevCombo = 0
 
   /** Once-per-fight guard so deviation failure doesn't re-fire every frame. */
   private overboardPlaying = false
@@ -88,7 +107,13 @@ export class BattleState implements IFishingState {
 
   // --- Layer 2: willpower (on-beat taps + background drain) ---
   private willpower: number
-  private readonly initialWillpower: number
+  private initialWillpower: number
+
+  // --- Catch result (fed into the Livewell / CatchState) ---
+  /** True when the dynamic chart rolled a Boss variant this fight. */
+  private isBossFight = false
+  /** Localized sea-zone name captured at the moment the hook dropped. */
+  private battleZoneName = ''
 
   // --- Difficulty (stage-driven) ---
   /** Effective strictness = max(def.strictness, stage floor). */
@@ -135,7 +160,8 @@ export class BattleState implements IFishingState {
     // abyss. Strictness floor also pinches it on deep fish.
     this.safeHalfBase = Math.max(0.08, 0.18 - this.effStrictness * 0.1) * stage.windowMul
     this.safeHalf = this.safeHalfBase
-    this.pullListener = (j, now, beatPhase) => this.onPullJudgement(j, now, beatPhase)
+    this.pullListener = (j, now, beatPhase, dir) =>
+      this.onPullJudgement(j, now, beatPhase, dir ?? 0)
   }
 
   enter(payload?: unknown): void {
@@ -155,7 +181,7 @@ export class BattleState implements IFishingState {
     this.ctx.tensionBar.container.visible = true
     this.ctx.willpowerBar.container.visible = true
     this.ctx.pullPanel.container.visible = true
-    this.ctx.noteLane.container.visible = false
+    this.ctx.noteLane.container.visible = true
     this.ctx.pullPanel.reset()
     this.ctx.pullPanel.setMode('battle')
     this.ctx.reelButtons.setVisible(false)
@@ -196,6 +222,53 @@ export class BattleState implements IFishingState {
     this.ctx.audio.resyncScheduler()
     this.ctx.audio.riseToSection(startSection)
 
+    this.ctx.noteLane.start()
+    this.ctx.noteLane.setDensityRange(stage.noteFloor, stage.noteCap)
+    this.ctx.noteLane.setLookAhead(stage.noteLookAheadBeats)
+    this.ctx.noteLane.setIntensity(this.ctx.audio.getMusicIntensity())
+    this.ctx.noteLane.setDirectionProvider((beatIndex) => this.dirForBeat(beatIndex))
+
+    // Arcaea judgement engine
+    const trackProvider = this.ctx.battleChaseView.getTrackProvider()
+    // Dynamic difficulty director: the drop-hook sea zone + the player's catch
+    // record decide the whole chart's character (easy floor → mid interlock →
+    // deep-sea climax) and can roll a rare/Boss variant on a long streak.
+    const zone = this.ctx.progression.stage.zone
+    const successCount = this.ctx.progression.totalCaught
+    const track = generateDemoTrack(zone, successCount)
+    this.ctx.battleChaseView.setChart(track)
+    this.ctx.battleChaseView.setChaseSpeedForZone(zone)
+    // Remember the fight's character so the catch result can grade it and
+    // file the trophy into the Livewell with the right zone + Boss tier.
+    this.isBossFight = track.isBoss
+    this.battleZoneName = t(`stage.${this.ctx.progression.stage.name}`)
+    // Boss = tougher, longer fight + a golden tint over the fish's own colour.
+    if (track.isBoss) {
+      this.willpower *= 1.6
+      this.initialWillpower = this.willpower
+      this.ctx.battleChaseView.setFishTint(0xffd24a)
+    }
+    // Anchor the linear level so it always begins at THIS moment, regardless of
+    // song position.
+    trackProvider.setStartBeat(this.ctx.beatClock.currentBeat())
+    this.judge = new ArcaeaJudge(this.ctx.beatClock, trackProvider)
+    this.judge.setChaseAdapter({
+      projectToScreen: (wx, wy, wz) =>
+        this.ctx.battleChaseView.projectWorldToScreen(wx, wy, wz),
+      snapPenguinToLx: (lx) => this.ctx.battleChaseView.snapPenguinToLx(lx),
+      emitTrackBurst: () => this.ctx.battleChaseView.emitArcTrackBurst(),
+      setTrackPointer: (x, y) => this.ctx.battleChaseView.setSkyTrackPointer(x, y),
+    })
+    this.judge.onJudge = (ev) => {
+      this.ctx.arcaeaHud.onJudge(ev)
+      this.applyArcaeaJudgement(ev.judgement, ev.type)
+      if (ev.type === 'floor' && ev.judgement !== 'LOST' && ev.lane !== undefined) {
+        this.ctx.battleChaseView.triggerGroundHit(ev.lane, ev.judgement)
+      }
+    }
+    this.judge.start()
+    this.prevCombo = 0
+
     this.ctx.pullPanel.onJudgement = this.pullListener
 
     this.frenzyActive = false
@@ -217,8 +290,6 @@ export class BattleState implements IFishingState {
       this.ctx.pullPanel.update(dtSeconds, performance.now())
       return
     }
-    // Tug first so the fresh offset is ready when updateFish renders
-    // the fish via moveFish this same frame.
     this.updateTug(dtSeconds)
     this.updateFish(dtSeconds)
     this.checkDownbeat()
@@ -227,12 +298,112 @@ export class BattleState implements IFishingState {
     this.updateFrenzy(dtSeconds)
     this.ctx.pullPanel.update(dtSeconds, performance.now())
     this.updateWillpowerBackground(dtSeconds)
+
+    // Arcaea judge: per-frame update (spawns notes, auto-miss, sky-arc
+    // multi-touch pixel tracking).
+    if (this.judge) {
+      this.judge.update(dtSeconds, this.ctx.activePointers)
+
+      // Sync visual states to renderer
+      for (const note of this.judge.floorNotes) {
+        if (note.judgement === 'PURE') {
+          this.ctx.battleChaseView.setGroundNoteState(note.beatIndex, 'pure')
+        } else if (note.judgement === 'FAR') {
+          this.ctx.battleChaseView.setGroundNoteState(note.beatIndex, 'far')
+        } else if (note.judgement === 'LOST') {
+          this.ctx.battleChaseView.setGroundNoteState(note.beatIndex, 'lost')
+        }
+      }
+      // Sky stream glow (continuous tracking)
+      this.ctx.battleChaseView.setSkyArcGlow(this.judge.skyGlowing)
+
+      // Combo display
+      const combo = this.judge.combo
+      this.ctx.arcaeaHud.setCombo(combo)
+      this.ctx.battleChaseView.setComboCount(combo)
+      if (combo > this.prevCombo && combo >= 2) {
+        this.ctx.arcaeaHud.pulseCombo()
+      }
+      this.prevCombo = combo
+    }
+
     this.updateUi()
     if (this.ctx.boat.getDeviation() >= 1 || this.ctx.boat.getWaveSubmerge() >= 0.92) {
       this.overboardFail()
       return
     }
     this.checkOutcomes()
+  }
+
+  // ---- Arcaea lane input ----
+
+  onLaneHit(lane: number): void {
+    if (!this.judge || this.overboardPlaying) return
+    const result = this.judge.hitLane(lane)
+    if (result) {
+      // Steer the penguin toward the tapped lane so the diver visually
+      // dives to the correct lane on floor notes.
+      const lx = LANE_X[Math.max(0, Math.min(3, lane))]
+      this.ctx.battleChaseView.aimAtLx(lx)
+      // Audio feedback
+      if (result === 'PURE') {
+        this.ctx.audio.playPerfectChime()
+        this.ctx.battleChaseView.triggerApexBurst()
+      } else if (result === 'FAR') {
+        this.ctx.audio.playKick()
+      }
+    }
+  }
+
+  /**
+   * Translate an Arcaea judgement into the tension / willpower / frenzy
+   * game mechanics. Called from the ArcaeaJudge event callback.
+   */
+  private applyArcaeaJudgement(judgement: Judgement, type: 'floor' | 'sky-tick'): void {
+    const sky = type === 'sky-tick'
+    const toCenter = this.safeCenter - this.trackerT
+    if (judgement === 'PURE') {
+      // Sky ticks are a continuous trickle (10/sec): small pull, small drain,
+      // and no heavy ocean FX every frame. Floor taps are the big discrete hit.
+      this.trackerT += toCenter * (sky ? 0.12 : 0.45)
+      this.clearStruggle()
+      this.growSafeHalf(sky ? 0.006 : 0.035)
+      const drain = sky ? WP_DRAIN_SKY_TICK : WP_DRAIN_PERFECT
+      this.willpower = Math.max(0, this.willpower - this.initialWillpower * drain)
+      this.beatHitThisDownbeat = true
+      this.consecutiveBeatMisses = 0
+      if (this.frenzyActive) {
+        this.willpower = Math.max(0, this.willpower - this.initialWillpower * (sky ? 0.002 : 0.012))
+        this.ctx.addScore(sky ? 1 : 2)
+      }
+      if (!sky) {
+        this.ctx.ocean.triggerWaveBreak(1)
+        this.ctx.ocean.triggerCrestBurst(this.ctx.boat.deckCenterX)
+      }
+    } else if (judgement === 'FAR') {
+      this.trackerT += toCenter * 0.22
+      this.clearStruggle()
+      this.growSafeHalf(0.015)
+      this.willpower = Math.max(
+        0,
+        this.willpower - this.initialWillpower * WP_DRAIN_GOOD,
+      )
+      this.beatHitThisDownbeat = true
+      this.consecutiveBeatMisses = 0
+      if (this.frenzyActive) {
+        this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.007)
+        this.ctx.addScore(1)
+      }
+      this.ctx.ocean.triggerWaveBreak(0.5)
+    } else {
+      // LOST
+      this.trackerT -= Math.sign(toCenter) * 0.04
+      this.shrinkSafeHalf(0.025)
+      if (type === 'floor') {
+        this.ctx.shake(5, 0.22)
+        this.ctx.audio.playFail()
+      }
+    }
   }
 
   // ---- pointer routing ----
@@ -246,6 +417,12 @@ export class BattleState implements IFishingState {
   }
 
   exit(): void {
+    if (this.judge) {
+      this.judge.stop()
+      this.judge = null
+    }
+    this.ctx.arcaeaHud.setCombo(0)
+    this.ctx.battleChaseView.setSkyArcGlow(false)
     this.ctx.tensionBar.container.visible = false
     this.ctx.willpowerBar.container.visible = false
     this.ctx.pullPanel.container.visible = false
@@ -434,26 +611,67 @@ export class BattleState implements IFishingState {
     }
   }
 
+  /**
+   * Steer direction the fish (sky path) is weaving toward AROUND a beat:
+   * -1 left, +1 right, 0 near an apex (just tap, no swipe needed). Both
+   * the NoteLane arrows and the tap judgement read from this one source
+   * so the on-screen cue always matches what counts as "correct".
+   */
+  private dirForBeat(beat: number): number {
+    const a = this.ctx.battleChaseView.requiredLxAtScroll(beat - 0.5)
+    const b = this.ctx.battleChaseView.requiredLxAtScroll(beat + 0.5)
+    const d = b - a
+    if (d > 0.06) return 1
+    if (d < -0.06) return -1
+    return 0
+  }
+
   /** Called by PullPanel on every tap (via the listener wired in enter). */
-  private onPullJudgement(judgement: TapJudgement, _nowMs: number, beatPhase: number): void {
-    this.ctx.boat.applyRhythmJudgement(judgement, beatPhase)
-    if (judgement === 'perfect' || judgement === 'good') {
-      this.ctx.ocean.triggerWaveBreak(judgement === 'perfect' ? 1 : 0.65)
+  private onPullJudgement(
+    judgement: TapJudgement,
+    nowMs: number,
+    beatPhase: number,
+    dir: number,
+  ): void {
+    // "Follow the fish": a well-timed tap that swipes the WRONG way still
+    // misses the fish, so it's downgraded. A right-time / right-way swipe
+    // lands clean. Apex notes (requiredDir 0) accept a plain tap.
+    const beatIndex = this.ctx.beatClock.started
+      ? this.ctx.beatClock.nearestBeatIndex(nowMs)
+      : 0
+    const requiredDir = this.dirForBeat(beatIndex)
+    const needsDir = requiredDir !== 0
+    const correctDir = !needsDir || dir === requiredDir
+    let eff: TapJudgement = judgement
+    if (judgement !== 'miss' && needsDir && !correctDir) {
+      eff = judgement === 'perfect' ? 'good' : 'miss'
+    }
+
+    this.ctx.noteLane.registerTap(judgement, nowMs, dir)
+    this.ctx.boat.applyRhythmJudgement(eff, beatPhase)
+
+    const { width, height } = this.ctx.viewport
+    const proj = chaseProjectionForViewport(width, height)
+    const scroll = this.ctx.beatClock.currentBeat() + this.ctx.beatClock.phase()
+
+    if (eff === 'perfect' || eff === 'good') {
+      this.ctx.ocean.triggerWaveBreak(eff === 'perfect' ? 1 : 0.65)
       this.ctx.ocean.triggerCrestBurst(this.ctx.boat.deckCenterX)
-      const { width, height } = this.ctx.viewport
-      const proj = chaseProjectionForViewport(width, height)
-      const scroll =
-        this.ctx.beatClock.currentBeat() + this.ctx.beatClock.phase()
+      // Snap the diver onto the fish line and pop the catch spark.
       this.ctx.battleChaseView.aimAtRequiredLx(scroll, proj.cx, proj.lateralPix)
       this.ctx.battleChaseView.triggerApexBurst()
       this.beatHitThisDownbeat = true
       this.consecutiveBeatMisses = 0
     } else {
+      // Lunge toward where the player actually swiped so the diver visibly
+      // overshoots and the fish slips away — unmistakable "wrong way".
+      const steer = dir !== 0 ? dir : -requiredDir
+      this.ctx.battleChaseView.aimAtScreenX(proj.cx + steer * proj.lateralPix)
       this.ctx.shake(5, 0.22)
     }
 
     const toCenter = this.safeCenter - this.trackerT
-    if (judgement === 'perfect') {
+    if (eff === 'perfect') {
       this.trackerT += toCenter * 0.55
       this.clearStruggle()
       this.growSafeHalf(0.040)
@@ -462,7 +680,7 @@ export class BattleState implements IFishingState {
         this.willpower = Math.max(0, this.willpower - this.initialWillpower * 0.012)
         this.ctx.addScore(2)
       }
-    } else if (judgement === 'good') {
+    } else if (eff === 'good') {
       this.trackerT += toCenter * 0.28
       this.clearStruggle()
       this.growSafeHalf(0.018)
@@ -649,7 +867,7 @@ export class BattleState implements IFishingState {
     // Audio: push intensity up two layers so the chorus opens up
     // around the player.
     this.ctx.audio.bumpMusicIntensity()
-    this.ctx.audio.bumpMusicIntensity()
+    this.ctx.noteLane.setIntensity(this.ctx.audio.bumpMusicIntensity())
     this.ctx.audio.playPerfectChime()
     this.ctx.frenzyOverlay.activate()
     this.ctx.shake(5, 0.35)
@@ -755,6 +973,18 @@ export class BattleState implements IFishingState {
     this.ctx.audio.playFanfare()
     this.ctx.shake(6, 0.3)
     this.ctx.mermaidRock.hide()
-    this.ctx.goTo(new CatchState(this.ctx), { def: this.def })
+    // Grade the rhythm performance BEFORE exit() stops the judge — a weighted
+    // hit-rate (PURE full credit, FAR half) drives the "perfect capture" tier.
+    let accuracy = 1
+    if (this.judge) {
+      const total = this.judge.pureCount + this.judge.farCount + this.judge.lostCount
+      accuracy = total > 0 ? (this.judge.pureCount + this.judge.farCount * 0.5) / total : 1
+    }
+    this.ctx.goTo(new CatchState(this.ctx), {
+      def: this.def,
+      accuracy,
+      isBoss: this.isBossFight,
+      zoneName: this.battleZoneName,
+    })
   }
 }

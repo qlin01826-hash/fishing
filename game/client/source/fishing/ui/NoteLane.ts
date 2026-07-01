@@ -12,6 +12,8 @@ interface LaneNote {
   effectT: number
   /** Whether this note sits on a downbeat (1/4) or off-beat (1/8, 1/16). */
   weight: 'down' | 'off' | 'ghost'
+  /** Required steer direction for this note: -1 left, 0 centre tap, +1 right. */
+  dir: number
 }
 
 /**
@@ -115,6 +117,13 @@ export class NoteLane {
 
   private beatClock: BeatClock | null = null
 
+  /**
+   * Optional per-beat steer-direction source. BattleState wires this to
+   * the fish's lateral path so downbeat notes show which way to swipe
+   * ("follow the fish"). Returns -1 / 0 / +1.
+   */
+  private directionProvider: ((beatIndex: number) => number) | null = null
+
   // Layout
   private hitX = 0
   private laneY = 0
@@ -150,6 +159,15 @@ export class NoteLane {
 
   attachBeatClock(clock: BeatClock): void {
     this.beatClock = clock
+  }
+
+  /**
+   * Supply a steer-direction source for downbeat notes (-1 / 0 / +1).
+   * Pass `null` to fall back to plain centre-tap notes. Set this AFTER
+   * {@link start} (start → reset clears it).
+   */
+  setDirectionProvider(fn: ((beatIndex: number) => number) | null): void {
+    this.directionProvider = fn
   }
 
   setLayout(hitX: number, laneY: number, laneLength: number): void {
@@ -240,6 +258,7 @@ export class NoteLane {
     this.lookAheadBeats = 2
     this.nextSpawnSlot = 0
     this.missText.alpha = 0
+    this.directionProvider = null
   }
 
   /**
@@ -250,7 +269,7 @@ export class NoteLane {
    * Returns the consumed note's judgement, or `null` if the tap landed
    * with no nearby live note (an off-beat phantom tap).
    */
-  registerTap(judgement: TapJudgement, nowMs: number): TapJudgement | null {
+  registerTap(judgement: TapJudgement, nowMs: number, swipeDir = 0): TapJudgement | null {
     if (!this.beatClock?.started || !this.active) return null
     // Off-beat taps (Miss) do not consume notes — they're "wasted" by design,
     // and only auto-misses (beats passed without any tap) feed into struggle.
@@ -270,12 +289,20 @@ export class NoteLane {
       }
     }
     if (!best) return null
+    // Right time, wrong way: the swipe didn't follow the fish. Mark it as
+    // a miss visually so the player sees the steering mistake.
+    const wrongDir = best.dir !== 0 && swipeDir !== best.dir
+    const shown: TapJudgement = wrongDir ? 'miss' : judgement
     best.state = 'hit'
-    best.judgement = judgement
+    best.judgement = shown
     best.effectT = 1
-    this.consecutiveAutoMisses = 0
-    this.spawnHitParticles(this.hitX, this.laneY, judgement)
-    return judgement
+    if (wrongDir) {
+      this.flashMissText('WRONG WAY')
+    } else {
+      this.consecutiveAutoMisses = 0
+    }
+    this.spawnHitParticles(this.hitX, this.laneY, shown)
+    return shown
   }
 
   update(dtSeconds: number, nowMs: number): void {
@@ -391,12 +418,25 @@ export class NoteLane {
     const outerColors = { down: 0xffd166, off: 0x9fe6ff, ghost: 0x6fbed1 } as const
     const innerColors = { down: 0xfff3c1, off: 0xd9f6ff, ghost: 0xb4dfec } as const
     const outerR = sizes[weight]
+    // Only downbeats carry a steer direction; off/ghost stay simple taps.
+    const dir = weight === 'down' && this.directionProvider ? this.directionProvider(beatIndex) : 0
     g.circle(0, 0, outerR)
     g.fill({ color: outerColors[weight], alpha: weight === 'ghost' ? 0.65 : 1 })
     g.stroke({ color: 0x000000, width: 2, alpha: weight === 'ghost' ? 0.5 : 0.8 })
     // Inner ring highlight gives the note a "drum-skin" feel.
     g.circle(0, 0, Math.max(3, outerR * 0.55))
     g.fill({ color: innerColors[weight], alpha: 0.9 })
+    if (dir !== 0) {
+      // Bold chevrons pointing the way to swipe — "follow the fish".
+      const base = outerR + 4
+      for (let k = 0; k < 2; k += 1) {
+        const ox = dir * (base + k * 7)
+        g.moveTo(ox, -7)
+        g.lineTo(ox + dir * 7, 0)
+        g.lineTo(ox, 7)
+        g.stroke({ color: 0xffffff, width: 3, alpha: 0.92 })
+      }
+    }
     this.noteLayer.addChild(g)
     // Pre-position offscreen so the first paint doesn't flicker at (0,0).
     g.position.set(this.hitX + this.laneLength + 30, this.laneY)
@@ -407,12 +447,14 @@ export class NoteLane {
       judgement: null,
       effectT: 0,
       weight,
+      dir,
     })
   }
 
   private spawnHitParticles(x: number, y: number, judgement: TapJudgement): void {
-    const count = judgement === 'perfect' ? 12 : 7
-    const color = judgement === 'perfect' ? 0xffd166 : 0x9fe6ff
+    const count = judgement === 'perfect' ? 12 : judgement === 'miss' ? 5 : 7
+    const color =
+      judgement === 'perfect' ? 0xffd166 : judgement === 'miss' ? 0xff6b6b : 0x9fe6ff
     for (let i = 0; i < count; i += 1) {
       const g = new Graphics()
       g.circle(0, 0, 3 + Math.random() * 2)
@@ -467,15 +509,18 @@ export class NoteLane {
   }
 
   private drawHitZone(nowMs: number): void {
-    // The PullPanel underneath already pulses on beat, so we only paint
-    // a very faint hairline guide here — just enough to anchor the eye
-    // and not enough to fight the panel's own visual rhythm.
+    // Mobile needs an explicit judgement line: notes are correct when
+    // they touch this vertical marker, which sits on the PullPanel centre.
     const g = this.hitZone
     g.clear()
     if (!this.beatClock?.started) return
     const phase = this.beatClock.phase(nowMs)
     const flash = phase < 0.18 ? 1 - phase / 0.18 : 0
-    g.circle(this.hitX, this.laneY, 9 + flash * 4)
-    g.stroke({ color: 0xffd166, width: 1, alpha: 0.25 + flash * 0.4 })
+    const lineHalf = 54 + flash * 8
+    g.moveTo(this.hitX, this.laneY - lineHalf)
+    g.lineTo(this.hitX, this.laneY + lineHalf)
+    g.stroke({ color: 0xffd166, width: 4, alpha: 0.58 + flash * 0.32 })
+    g.circle(this.hitX, this.laneY, 10 + flash * 5)
+    g.stroke({ color: 0xffffff, width: 2, alpha: 0.35 + flash * 0.45 })
   }
 }

@@ -21,6 +21,25 @@ export type Rarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary'
  */
 export type FishSize = 'tiny' | 'small' | 'medium' | 'large' | 'huge'
 
+/** Display-tier for a kept catch — Boss is a synthetic top tier above legendary. */
+export type KeeperTier = Rarity | 'boss'
+
+/**
+ * A single trophy stored in the persistent session Livewell (Fish Keeper).
+ * Built at catch time from the caught FishDef + the fight's zone/accuracy.
+ */
+export interface KeeperFish {
+  id: number
+  /** Localized display name of the species. */
+  species: string
+  /** Rarity tier (drives the list text colour + glow). */
+  tier: KeeperTier
+  /** Formatted physical weight, e.g. "12.4kg". */
+  weight: string
+  /** Localized sea-zone name where it was landed. */
+  zone: string
+}
+
 /**
  * Silhouette shape — picked separately from size so e.g. a `large
  * torpedo` (tuna) and a `large flat` (ray) read very differently

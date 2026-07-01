@@ -1,8 +1,19 @@
 import type { CameraDynamics, ProjectedPoint, Transform3D } from './Transform3D'
 import type { TrackSplineProvider } from './TrackSplineProvider'
 
-/** Z-axis slice step for ribbon mesh (world units). */
+/** Base Z-axis slice step for ribbon mesh near the camera (world units). */
 export const RIBBON_STEP_Z = 15
+
+/**
+ * Adaptive depth stepping: slices stay dense near the judge plane (where the
+ * track fills the screen and curvature matters) and grow with depth, since the
+ * far field is perspective-compressed into a few pixels. This roughly halves
+ * the slice/projection/spline-sample count vs. a fixed step with no visible
+ * loss of fidelity — a big GC + fill-rate win, especially on tall phones.
+ */
+export function zSliceStep(worldZ: number, zMax: number): number {
+  return RIBBON_STEP_Z * (1 + (worldZ / zMax) * 2.5)
+}
 
 /** One cross-section of the track at a fixed world Z. */
 export interface TrackCrossSection {
@@ -14,6 +25,10 @@ export interface TrackCrossSection {
   skyThick: number
   fog: number
   isHold: boolean
+  /** Sky beat here is a rest — ribbon should break (not be drawn/judged). */
+  isRest: boolean
+  /** A floor note occupies this beat — sky slice can occlude it from view. */
+  floorBehind: boolean
 }
 
 /** Projected quad strip connecting two adjacent Z slices. */
@@ -24,6 +39,8 @@ export interface RibbonQuad {
   tl: ProjectedPoint
   tr: ProjectedPoint
   isHold: boolean
+  isRest: boolean
+  floorBehind: boolean
   fog: number
 }
 
@@ -68,7 +85,7 @@ export function buildCrossSections(
   const zMax = transform.zSpawn
   const out: TrackCrossSection[] = []
 
-  for (let worldZ = 0; worldZ <= zMax; worldZ += RIBBON_STEP_Z) {
+  for (let worldZ = 0; worldZ <= zMax; worldZ += zSliceStep(worldZ, zMax)) {
     const beatAhead = transform.zToBeatAhead(worldZ)
     const beat = scroll + beatAhead
     const sky = track.skyAtBeat(beat)
@@ -86,17 +103,25 @@ export function buildCrossSections(
         skyThick: 0,
         fog,
         isHold: false,
+        isRest: false,
+        floorBehind: false,
       })
     } else {
       const worldY = transform.skyChartYToWorldY(sky.y)
+      const ground = track.getGroundNodeAtBeat(Math.floor(beat))
+      // Near slices physically swell so the approaching head reads as a thick
+      // breaking wave; far slices stay thin so the depth gradient is legible.
+      const headBoost = 1 + Math.max(0, 1 - worldZ / (zMax * 0.16)) * 1.2
       out.push({
         worldZ,
         centerX,
         worldY,
-        halfWidth: transform.trackHalfWidth * 0.19,
-        skyThick: transform.skyHeight * 0.11,
+        halfWidth: transform.trackHalfWidth * 0.19 * headBoost,
+        skyThick: transform.skyHeight * 0.11 * headBoost,
         fog,
         isHold: node.type === 'hold',
+        isRest: node.type === 'rest',
+        floorBehind: ground.type !== 'rest',
       })
     }
   }
@@ -135,6 +160,8 @@ export function crossSectionsToQuads(
         tl: ftl,
         tr: ftr,
         isHold: near.isHold || far.isHold,
+        isRest: near.isRest || far.isRest,
+        floorBehind: near.floorBehind || far.floorBehind,
         fog: (near.fog + far.fog) * 0.5,
       })
     } else {
@@ -151,6 +178,8 @@ export function crossSectionsToQuads(
         tl: nl,
         tr: nr,
         isHold: false,
+        isRest: false,
+        floorBehind: false,
         fog: (near.fog + far.fog) * 0.5,
       })
     }

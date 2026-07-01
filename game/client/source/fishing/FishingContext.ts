@@ -27,6 +27,8 @@ import type { AudioSystem } from './systems/AudioSystem'
 import type { PointerTracker } from './systems/PointerTracker'
 import type { BeatClock } from './systems/BeatClock'
 import type { ProgressionSystem } from './systems/ProgressionSystem'
+import type { ArcaeaHud } from './ui/ArcaeaHud'
+import type { Livewell } from './ui/Livewell'
 import type { FishingEventBus } from './events'
 
 /**
@@ -59,6 +61,9 @@ export interface FishingContext {
   readonly noteLane: NoteLane
   readonly frenzyOverlay: FrenzyOverlay
   readonly battleChaseView: BattleChaseView
+  readonly arcaeaHud: ArcaeaHud
+  /** Persistent session Fish Keeper — trophies accumulate across the loop. */
+  readonly livewell: Livewell
   /** Outer render-mode controller (2D fishing ↔ 3D chase transition). */
   readonly gameState: GameStateController
   // Systems
@@ -66,6 +71,12 @@ export interface FishingContext {
   readonly weatherSystem: WeatherSystem
   readonly audio: AudioSystem
   readonly pointer: PointerTracker
+  /**
+   * Live multi-touch pointer table (id → screen-space x/y). Updated by the
+   * scene on every pointer down/move/up. Used by the Arcaea sky-arc tracker
+   * for per-frame pixel "bite" collision against all pressed fingers.
+   */
+  readonly activePointers: ReadonlyMap<number, { x: number; y: number }>
   readonly beatClock: BeatClock
   /**
    * Run difficulty ladder. The explicit, legible difficulty axis —

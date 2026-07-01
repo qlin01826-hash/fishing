@@ -42,6 +42,9 @@ export class DeepSeaAtmosphere {
   private time = 0
   private zSpawn = 1200
   private trackHalfWidth = 210
+  /** Cached gradient geometry size; the gradient is static so we skip redraws. */
+  private gradW = -1
+  private gradH = -1
 
   constructor() {
     this.lightRays.blendMode = 'screen'
@@ -114,6 +117,10 @@ export class DeepSeaAtmosphere {
   }
 
   private drawVerticalGradient(w: number, h: number): void {
+    // Static gradient — only rebuild geometry when the viewport size changes.
+    if (w === this.gradW && h === this.gradH) return
+    this.gradW = w
+    this.gradH = h
     const g = this.bg
     g.clear()
     const bandH = h / GRAD_BANDS + 1
@@ -180,8 +187,8 @@ export class DeepSeaAtmosphere {
   private drawMarineSnow(transform: Transform3D, dyn: CameraDynamics): void {
     const g = this.snow
     g.clear()
-    const sorted = [...this.particles].sort((a, b) => b.z - a.z)
-    for (const p of sorted) {
+    this.particles.sort((a, b) => b.z - a.z)
+    for (const p of this.particles) {
       const proj = transform.project(p.x, p.y, p.z, dyn)
       if (!proj) continue
       const r = p.r * (0.5 + proj.scale * 0.06)

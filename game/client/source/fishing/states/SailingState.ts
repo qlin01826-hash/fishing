@@ -38,6 +38,8 @@ export class SailingState implements IFishingState {
   }
 
   enter(): void {
+    // A fresh sailing leg lifts the anchor so the boat cruises again.
+    this.ctx.progression.unfreezeVoyage()
     this.ctx.hook.resetToRod(this.ctx.boat.rodTipX, this.ctx.boat.rodTipY)
     this.ctx.castPreview.hide()
     this.ctx.reelButtons.setVisible(false)
@@ -198,6 +200,9 @@ export class SailingState implements IFishingState {
     }
 
     this.closeCastWindow()
+    // Drop-hook = anchor the voyage in THIS sea zone (progress bar freezes so the
+    // boat stops dead where the player chose to fish).
+    this.ctx.progression.freezeVoyage()
     this.ctx.hook.launch(ux * speed, uy * speed, targetDepthY)
     this.ctx.goTo(new SinkingState(this.ctx))
   }

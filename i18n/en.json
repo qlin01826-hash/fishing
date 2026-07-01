@@ -47,8 +47,8 @@
     "lureListen": "LISTEN… learn the rhythm",
     "lureEcho": "ECHO IT ! Reel on the beat",
     "lureHooked": "A fish takes the lure !",
-    "battleIntro": "Tug-of-war! Tap PULL every downbeat — drain its willpower!",
-    "battlePullHint": "BEAT · SPACE",
+    "battleIntro": "Chase the fish! Swipe toward the arrow on each beat to stay on it and reel it in!",
+    "battlePullHint": "Swipe on beat · follow arrows ← →",
     "biteHint": "STRIKE !  Swipe UP to set the hook",
     "missedHint": "It got away…",
     "followFish": "FOLLOW  THE  FISH !",
@@ -65,7 +65,14 @@
     "windBreeze": "Light breeze",
     "windStrong": "Strong wind",
     "windStorm": "STORM !",
-    "enterStage": "Entering {{name}} !"
+    "enterStage": "Entering {{name}} !",
+    "livewellCollected": "{{name}} added to the Livewell!"
+  },
+  "livewell": {
+    "button": "Livewell ({{count}})",
+    "title": "Today's Catch",
+    "empty": "No catch yet — cast off!",
+    "tierBoss": "Boss"
   },
   "stage": {
     "shallows": "the Shallows",

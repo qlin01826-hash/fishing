@@ -49,10 +49,28 @@ export class PullPanel {
    * the tension tracker. Defaults to a no-op so the panel works
    * standalone in unit tests.
    */
-  onJudgement: (judgement: TapJudgement, nowMs: number, beatPhase: number) => void = () => {}
+  onJudgement: (judgement: TapJudgement, nowMs: number, beatPhase: number, dir?: number) => void =
+    () => {}
 
   private pressing = false
   private pressStart = 0
+
+  // --- Directional flick (battle "follow the fish" steering) ---
+  /**
+   * In battle mode a tap can carry a horizontal direction. We anchor the
+   * rhythm timing to the press instant but resolve the direction a few ms
+   * later: a quick left/right swipe reads as a steer (-1 / +1), a still
+   * tap stays a centre tap (0). This lets the diver chase the weaving fish
+   * while keeping the on-beat timing precise.
+   */
+  private flickPending = false
+  private flickDownMs = 0
+  private flickDownX = 0
+  private flickResolveHandle: number | null = null
+  /** Pixels of horizontal travel that count as a directional swipe. */
+  private readonly flickThresholdPx = 26
+  /** How long to wait for a swipe before resolving as a centre tap. */
+  private readonly flickResolveMs = 95
   /** Recent tap timestamps for frequency tracking. */
   private recentTaps: number[] = []
   private readonly tapPeakHz = 7
@@ -139,6 +157,7 @@ export class PullPanel {
     this.bg.eventMode = 'static'
     this.bg.cursor = 'pointer'
     this.bg.on('pointerdown', this.handleDown, this)
+    this.bg.on('globalpointermove', this.handleMove, this)
     this.bg.on('pointerup', this.handleUp, this)
     this.bg.on('pointerupoutside', this.handleUp, this)
     this.bg.on('pointercancel', this.handleUp, this)
@@ -254,6 +273,11 @@ export class PullPanel {
     this.tapPower = 0
     this.pressPower = 0
     this.pressing = false
+    this.flickPending = false
+    if (this.flickResolveHandle !== null) {
+      window.clearTimeout(this.flickResolveHandle)
+      this.flickResolveHandle = null
+    }
     this.recentTaps.length = 0
     this.comboCount = 0
     this.comboMultiplier = 1
@@ -270,20 +294,57 @@ export class PullPanel {
     return this.triggerTapInternal()
   }
 
-  private handleDown(_event: FederatedPointerEvent): void {
-    this.triggerTapInternal()
+  private handleDown(event: FederatedPointerEvent): void {
+    // Battle taps carry a steer direction resolved a few ms later; every
+    // other mode fires immediately so the rhythm stays tight.
+    if (this.mode === 'battle') {
+      this.beginFlick(event.global.x)
+    } else {
+      this.triggerTapInternal()
+    }
+  }
+
+  private handleMove(event: FederatedPointerEvent): void {
+    if (!this.flickPending) return
+    const dx = event.global.x - this.flickDownX
+    if (Math.abs(dx) >= this.flickThresholdPx) {
+      this.resolveFlick(dx > 0 ? 1 : -1)
+    }
   }
 
   private handleUp(_event: FederatedPointerEvent): void {
+    if (this.flickPending) this.resolveFlick(0)
     this.releaseHold()
+  }
+
+  /** Start a pending battle flick, anchoring timing to the press instant. */
+  private beginFlick(globalX: number): void {
+    this.flickPending = true
+    this.flickDownMs = performance.now()
+    this.flickDownX = globalX
+    this.pressing = true
+    this.pressStart = this.flickDownMs
+    if (this.flickResolveHandle !== null) window.clearTimeout(this.flickResolveHandle)
+    this.flickResolveHandle = window.setTimeout(() => this.resolveFlick(0), this.flickResolveMs)
+  }
+
+  /** Emit the pending flick as a tap with the resolved direction. */
+  private resolveFlick(dir: number): void {
+    if (!this.flickPending) return
+    this.flickPending = false
+    if (this.flickResolveHandle !== null) {
+      window.clearTimeout(this.flickResolveHandle)
+      this.flickResolveHandle = null
+    }
+    this.triggerTapInternal(dir, this.flickDownMs)
   }
 
   /**
    * Keyboard equivalent of a finger tap. Wired to the SPACE key by
    * FishingScene so PC players have a one-handed rhythm interface.
    */
-  keyboardTap(): void {
-    this.triggerTapInternal()
+  keyboardTap(dir = 0): void {
+    this.triggerTapInternal(dir)
   }
 
   /** Keyboard equivalent of finger lift (Space released). */
@@ -296,8 +357,8 @@ export class PullPanel {
    * matter the input device". Used by both Pixi pointer events and
    * keyboard events.
    */
-  private triggerTapInternal(): TapJudgement {
-    const now = performance.now()
+  private triggerTapInternal(dir = 0, atMs = performance.now()): TapJudgement {
+    const now = atMs
     const judgement = this.judgeTap(now)
     const beatPhase = this.beatClock?.started ? this.beatClock.phase(now) : 0.5
     const recentHz =
@@ -318,7 +379,7 @@ export class PullPanel {
     if (judgement === 'miss') this.missFlash = 1
     this.pressing = true
     this.pressStart = now
-    this.onJudgement(judgement, now, beatPhase)
+    this.onJudgement(judgement, now, beatPhase, dir)
     return judgement
   }
 

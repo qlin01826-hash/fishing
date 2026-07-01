@@ -34,6 +34,8 @@ import { CatchBanner } from './ui/CatchBanner'
 import { NoteLane } from './ui/NoteLane'
 import { FrenzyOverlay } from './ui/FrenzyOverlay'
 import { BattleChaseView } from './ui/BattleChaseView'
+import { ArcaeaHud } from './ui/ArcaeaHud'
+import { Livewell } from './ui/Livewell'
 
 import { HungerSystem } from './systems/HungerSystem'
 import { WeatherSystem } from './systems/WeatherSystem'
@@ -107,6 +109,8 @@ export class FishingScene implements GameScene {
   private readonly noteLane: NoteLane
   private readonly frenzyOverlay: FrenzyOverlay
   private readonly battleChaseView: BattleChaseView
+  private readonly arcaeaHud: ArcaeaHud
+  private readonly livewell = new Livewell()
   private readonly gameStateController: GameStateController
   private readonly hookTransitionFlash = new Graphics()
 
@@ -122,6 +126,9 @@ export class FishingScene implements GameScene {
   private readonly beatClock = new BeatClock()
   private readonly events = new EventBus<FishingEvents>()
   private gmPanel: GmPanel | null = null
+
+  /** Live multi-touch pointer table (screen coords) for Arcaea arc tracking. */
+  private readonly activePointers = new Map<number, { x: number; y: number }>()
 
   // Session state
   private sessionScore = 0
@@ -173,6 +180,7 @@ export class FishingScene implements GameScene {
     this.noteLane = new NoteLane()
     this.frenzyOverlay = new FrenzyOverlay()
     this.battleChaseView = new BattleChaseView()
+    this.arcaeaHud = new ArcaeaHud()
     this.gameStateController = new GameStateController()
 
     // Wire the BeatClock into the rhythm-dependent layers. The clock
@@ -252,6 +260,7 @@ export class FishingScene implements GameScene {
     this.aboveWaterContainer.addChild(this.abyssOverlay.container)
 
     this.rootContainer.addChild(this.battleChaseView.container)
+    this.rootContainer.addChild(this.arcaeaHud.container)
 
     this.topUiContainer.addChild(this.hookTransitionFlash)
 
@@ -273,6 +282,9 @@ export class FishingScene implements GameScene {
     // post-catch result banner still slides in over the top.
     this.topUiContainer.addChild(this.frenzyOverlay.container)
     this.topUiContainer.addChild(this.catchBanner.container)
+    // Livewell sits ABOVE the catch banner so its edge handle stays tappable
+    // and the "kept!" flash reads over the result banner.
+    this.topUiContainer.addChild(this.livewell.container)
 
     this.engine.app.stage.addChild(this.rootContainer)
 
@@ -316,7 +328,13 @@ export class FishingScene implements GameScene {
       this.progression.stage.zone,
     )
 
-    this.onResize(this.engine.app.renderer.width, this.engine.app.renderer.height)
+    // Lay out in LOGICAL (CSS) pixels — `renderer.screen` is the CSS rect,
+    // whereas `renderer.width/height` are the PHYSICAL backing-store size
+    // (CSS × devicePixelRatio). With Pixi `autoDensity` the stage and pointer
+    // input both live in CSS px, so the 3D projection must too; using the
+    // physical size here caused a devicePixelRatio-sized (2–3×) misalignment
+    // between the finger and the sky-arc judgement point on Retina screens.
+    this.onResize(this.engine.app.renderer.screen.width, this.engine.app.renderer.screen.height)
     this.refreshHud()
     // Pre-position the penguin on the boat deck so its commission
     // bubble doesn't flash at (0,0) for a single frame on first paint.
@@ -398,18 +416,17 @@ export class FishingScene implements GameScene {
     }
     this.hookTransitionFlash.visible = flashA > 0.01
 
-    if (showChase && (inChase3D || stateId === 'battle')) {
+    const chaseRendering = showChase && (inChase3D || stateId === 'battle')
+    if (chaseRendering) {
       this.pullPanel.setChaseHudMode(true)
       if (this.penguin.container.parent !== this.battleChaseView.actorLayer) {
         this.battleChaseView.actorLayer.addChild(this.penguin.container)
       }
-      const now = performance.now()
-      this.battleChaseView.update(simDt, now, this.beatClock)
       this.battleChaseView.setComboCount(this.pullPanel.getComboCount())
-      if (!this.penguin.isPathChasing()) {
-        const pose = this.battleChaseView.getPlayerPose()
-        this.penguin.setChasePose(pose.x, pose.y, pose.bank, pose.scale)
-      }
+      // NOTE: the actual 3D rebuild (battleChaseView.update) is deferred to the
+      // END of this frame — AFTER stateMachine.update runs the Arcaea judge — so
+      // the geometry Pixi composites reflects THIS frame's tracking + penguin
+      // snap with zero one-frame lag ("decide, then draw").
     } else {
       this.pullPanel.setChaseHudMode(false)
       if (this.battleChaseView.isActive()) {
@@ -504,7 +521,9 @@ export class FishingScene implements GameScene {
     this.lurePads.update(deltaSeconds, performance.now())
     this.eventOverlay.update(deltaSeconds)
     this.catchBanner.update(deltaSeconds)
+    this.livewell.update(deltaSeconds)
     this.noteLane.update(deltaSeconds, performance.now())
+    this.arcaeaHud.update(deltaSeconds)
     // FrenzyOverlay ticks centrally so it can finish its exit animation
     // even after BattleState has already torn down. BattleState only
     // activates/deactivates it; this loop owns its visual lifecycle.
@@ -516,6 +535,18 @@ export class FishingScene implements GameScene {
     this.refreshHud()
 
     this.stateMachine.update(dt, this.elapsedMs)
+
+    // Render the 3D chase LAST — now that the judge (inside stateMachine.update)
+    // has locked this frame's tracking state and hard-snapped the diver, rebuild
+    // the chase geometry so the painted frame is perfectly in sync with the
+    // newest pointer input (no perceptible finger lag).
+    if (chaseRendering) {
+      this.battleChaseView.update(simDt, performance.now(), this.beatClock)
+      if (!this.penguin.isPathChasing()) {
+        const pose = this.battleChaseView.getPlayerPose()
+        this.penguin.setChasePose(pose.x, pose.y, pose.bank, pose.scale)
+      }
+    }
 
     this.tickShake(dt)
   }
@@ -614,6 +645,8 @@ export class FishingScene implements GameScene {
     // every edge and the banner anchors near the top.
     this.frenzyOverlay.setLayout(width, height)
     this.battleChaseView.setLayout(width, height)
+    this.arcaeaHud.setLayout(width, height)
+    this.livewell.setLayout(width, height)
   }
 
   destroy(): void {
@@ -637,7 +670,14 @@ export class FishingScene implements GameScene {
 
   private toCanvas(e: PointerEvent): { x: number; y: number } {
     const rect = this.engine.app.canvas.getBoundingClientRect()
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    // Map CSS-rect pixels → the renderer's LOGICAL screen space (the same
+    // space Transform3D projects into). Normally rect size == screen size so
+    // the scale is 1, but if the canvas is CSS-scaled/letterboxed this keeps
+    // touch input aligned with the 3D judgement points on every device.
+    const screen = this.engine.app.renderer.screen
+    const sx = rect.width > 0 ? screen.width / rect.width : 1
+    const sy = rect.height > 0 ? screen.height / rect.height : 1
+    return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy }
   }
 
   private handlePointerDown(e: PointerEvent): void {
@@ -648,19 +688,42 @@ export class FishingScene implements GameScene {
     this.audio.startGrooveBed()
     this.engine.app.canvas.setPointerCapture?.(e.pointerId)
     const { x, y } = this.toCanvas(e)
-    if (this.stateMachine.currentId === 'battle') {
-      this.battleChaseView.aimAtScreenX(x)
+    // Track this finger in the live multi-touch table (Arcaea arc tracking).
+    this.activePointers.set(e.pointerId, { x, y })
+    // Arcaea touch-lane detection: during battle, taps in the lower half
+    // of the screen (outside the PullPanel) are mapped to 4 lanes.
+    if (
+      this.stateMachine.currentId === 'battle' &&
+      y > this.viewport.height * 0.45 &&
+      !this.pullPanel.containsGlobalPoint(x, y)
+    ) {
+      const w = this.viewport.width
+      const lane =
+        x < w * 0.25 ? 0 : x < w * 0.5 ? 1 : x < w * 0.75 ? 2 : 3
+      this.stateMachine.laneHit(lane)
     }
     this.stateMachine.pointerDown(x, y, e.pointerId)
   }
 
   private handlePointerMove(e: PointerEvent): void {
-    const { x, y } = this.toCanvas(e)
+    // High-frequency event coalescing: iPad Pro / 120Hz panels sample touch
+    // far faster than rAF fires, so a single pointermove discards the chip's
+    // in-between micro-points. We replay the freshest coalesced sample into the
+    // multi-touch table so the sweep test sees the true latest fingertip (no
+    // sampling blind spot between animation frames).
+    const coalesced = e.getCoalescedEvents?.()
+    const freshest = coalesced && coalesced.length > 0 ? coalesced[coalesced.length - 1] : e
+    const { x, y } = this.toCanvas(freshest)
+    // Keep the pointer's latest screen position current for arc bite checks.
+    if (this.activePointers.has(e.pointerId)) {
+      this.activePointers.set(e.pointerId, { x, y })
+    }
     this.stateMachine.pointerMove(x, y, e.pointerId)
   }
 
   private handlePointerUp(e: PointerEvent): void {
     const { x, y } = this.toCanvas(e)
+    this.activePointers.delete(e.pointerId)
     this.stateMachine.pointerUp(x, y, e.pointerId)
   }
 
@@ -693,16 +756,28 @@ export class FishingScene implements GameScene {
       }
     }
 
+    // Arcaea 4-lane floor input: D=lane0, F=lane1, J=lane2, K=lane3
+    if (this.stateMachine.currentId === 'battle') {
+      const laneMap: Record<string, number> = {
+        KeyD: 0,
+        KeyF: 1,
+        KeyJ: 2,
+        KeyK: 3,
+      }
+      const lane = laneMap[e.code]
+      if (lane !== undefined) {
+        e.preventDefault()
+        if (e.repeat) return
+        this.audio.unlock()
+        this.stateMachine.laneHit(lane)
+        return
+      }
+    }
+
     if (!this.isSpaceKey(e)) return
     e.preventDefault()
-    if (e.repeat) {
-      // Suppress key-repeat: holding Space should behave like "press
-      // and hold the panel" (steady press), not "fire a fresh tap
-      // every 30ms".
-      return
-    }
+    if (e.repeat) return
     if (!this.pullPanel.container.visible) return
-    // Audio unlock requires a user gesture; keydown counts.
     this.audio.unlock()
     this.pullPanel.keyboardTap()
   }
@@ -766,12 +841,15 @@ export class FishingScene implements GameScene {
       noteLane: this.noteLane,
       frenzyOverlay: this.frenzyOverlay,
       battleChaseView: this.battleChaseView,
+      arcaeaHud: this.arcaeaHud,
+      livewell: this.livewell,
       gameState: this.gameStateController,
       shake: (amplitude: number, duration: number) => scene.triggerShake(amplitude, duration),
       hungerSystem: this.hungerSystem,
       weatherSystem: this.weatherSystem,
       audio: this.audio,
       pointer: this.pointer,
+      activePointers: this.activePointers,
       beatClock: this.beatClock,
       progression: this.progression,
       events: this.events,

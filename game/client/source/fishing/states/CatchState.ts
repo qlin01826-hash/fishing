@@ -1,12 +1,18 @@
 import { t } from '@minigame/i18n'
 import type { IFishingState } from '../StateMachine'
 import type { FishingContext } from '../FishingContext'
-import type { FishDef, FishingStateId } from '../types'
+import type { FishDef, FishingStateId, FishSize, KeeperTier } from '../types'
 import { FISHING_CONSTANTS } from '../types'
 import { SailingState } from './SailingState'
 
 interface CatchPayload {
   def?: FishDef
+  /** Weighted rhythm hit-rate (0..1) from the fight — >=0.85 = perfect capture. */
+  accuracy?: number
+  /** The fight rolled a Boss chart variant. */
+  isBoss?: boolean
+  /** Localized sea-zone name captured when the hook dropped. */
+  zoneName?: string
 }
 
 /**
@@ -61,6 +67,20 @@ export class CatchState implements IFishingState {
       def: this.def,
       score,
       commissionFulfilled,
+    })
+
+    // File the trophy into the persistent Livewell. A high-accuracy fight on a
+    // Boss chart lands the zone's apex specimen (Boss tier + a heftier weight);
+    // otherwise the species keeps its own rarity. This never resets — it
+    // accumulates across the whole infinite fishing loop.
+    const isBoss = p?.isBoss ?? false
+    const perfect = (p?.accuracy ?? 1) >= 0.85
+    const tier: KeeperTier = isBoss ? 'boss' : this.def.rarity
+    this.ctx.livewell.add({
+      species: t(`fish.${this.def.i18nKey}`),
+      tier,
+      weight: rollWeight(this.def.size, isBoss, perfect),
+      zone: p?.zoneName ?? t(`stage.${this.ctx.progression.stage.name}`),
     })
 
     this.ctx.catchBanner.show(
@@ -123,4 +143,20 @@ export class CatchState implements IFishingState {
   exit(): void {
     this.ctx.catchBanner.hide()
   }
+}
+
+/** Roll a plausible physical weight from the size tier (Boss + perfect swell it). */
+function rollWeight(size: FishSize, isBoss: boolean, perfect: boolean): string {
+  const ranges: Record<FishSize, [number, number]> = {
+    tiny: [0.1, 0.8],
+    small: [0.8, 3],
+    medium: [3, 9],
+    large: [9, 25],
+    huge: [25, 70],
+  }
+  const [lo, hi] = ranges[size]
+  let kg = lo + Math.random() * (hi - lo)
+  if (isBoss) kg *= 1.8 + Math.random() * 0.7
+  if (perfect) kg *= 1.08
+  return `${kg.toFixed(1)}kg`
 }

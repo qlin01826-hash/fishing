@@ -17,6 +17,8 @@ export interface IFishingState {
   onPointerDown?(x: number, y: number, pointerId: number): void
   onPointerMove?(x: number, y: number, pointerId: number): void
   onPointerUp?(x: number, y: number, pointerId: number): void
+  /** Arcaea 4-lane floor hit (lane 0..3). Only BattleState handles this. */
+  onLaneHit?(lane: number): void
   exit(): void
 }
 
@@ -48,6 +50,10 @@ export class StateMachine {
 
   pointerUp(x: number, y: number, pointerId: number): void {
     this.current?.onPointerUp?.(x, y, pointerId)
+  }
+
+  laneHit(lane: number): void {
+    this.current?.onLaneHit?.(lane)
   }
 
   destroy(): void {

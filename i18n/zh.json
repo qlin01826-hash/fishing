@@ -47,8 +47,8 @@
     "lureListen": "听…记住这段节拍",
     "lureEcho": "敲回去！跟着拍点收线",
     "lureHooked": "鱼上钩了！",
-    "battleIntro": "跟鱼拔河！每个拍点按「拉力」，把鱼拽上来！",
-    "battlePullHint": "拍点 · 空格",
+    "battleIntro": "追鱼啦！每个拍点朝箭头方向滑动，跟住鱼把它拽上来！",
+    "battlePullHint": "拍点滑动 · 跟箭头 ← →",
     "biteHint": "提竿！向上滑动设钩",
     "missedHint": "鱼跑了…",
     "followFish": "跟  紧  鱼 !",
@@ -65,7 +65,14 @@
     "windBreeze": "微风轻拂",
     "windStrong": "大风呼啸",
     "windStorm": "狂  风  暴  雨 !",
-    "enterStage": "驶入{{name}}！"
+    "enterStage": "驶入{{name}}！",
+    "livewellCollected": "【{{name}}】已收入鱼护！"
+  },
+  "livewell": {
+    "button": "鱼护 ({{count}})",
+    "title": "本次渔获",
+    "empty": "还没有渔获…出海下钩吧！",
+    "tierBoss": "首领"
   },
   "stage": {
     "shallows": "浅滩",

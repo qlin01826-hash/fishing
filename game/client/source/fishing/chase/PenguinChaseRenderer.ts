@@ -79,6 +79,7 @@ export class PenguinChaseRenderer {
     bankIntensity: number,
     tapPulse: number,
     nowMs: number,
+    screenOverride: { x: number; y: number } | null = null,
   ): void {
     void tapPulse
     const rollAngle = clamp(roll, -ROLL_CLAMP, ROLL_CLAMP)
@@ -91,6 +92,14 @@ export class PenguinChaseRenderer {
       this.g.clear()
       this.cavG.clear()
       return
+    }
+    // Rigid pointer weld: when riding an energised slide we hijack the SCREEN
+    // position straight from the finger's raw pixel (keeping the projected
+    // scale/rotation) so the diver, the glow reticle and the fingertip are
+    // welded into one zero-latency point — no 3D/audio-thread step lag.
+    if (screenOverride) {
+      bodyProj.x = screenOverride.x
+      bodyProj.y = screenOverride.y
     }
     this.lastBodyScreen = bodyProj
 

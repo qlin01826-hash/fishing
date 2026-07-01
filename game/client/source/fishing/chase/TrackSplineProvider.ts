@@ -3,6 +3,7 @@ import {
   BEATS_PER_BAR,
   DEFAULT_GROUND_CHART,
   DEFAULT_SKY_CHART,
+  DEMO_TRACK,
   LANE_X,
   type GroundChartNode,
   type SkyChartNode,
@@ -18,11 +19,6 @@ export const DEFAULT_CHASE_CHART: TrackChartNode[] = DEFAULT_SKY_CHART.map((n) =
   y: n.y,
 }))
 
-function smootherstep(t: number): number {
-  const x = Math.max(0, Math.min(1, t))
-  return x * x * x * (x * (x * 6 - 15) + 10)
-}
-
 function cr(p0: number, p1: number, p2: number, p3: number, t: number): number {
   const t2 = t * t
   const t3 = t2 * t
@@ -36,15 +32,21 @@ function cr(p0: number, p1: number, p2: number, p3: number, t: number): number {
  * Native 3D track data — all positions in world (X,Y,Z) before {@link Transform3D}.
  */
 export class TrackSplineProvider implements ITrackSplineProvider {
-  private readonly groundChart: GroundChartNode[]
-  private readonly skyChart: SkyChartNode[]
+  private groundChart: GroundChartNode[]
+  private skyChart: SkyChartNode[]
   private transform: Transform3D
   private readonly _tangent = new Vector3()
+  /**
+   * Absolute beat that maps to LOCAL beat 0 of the linear chart. Captured when
+   * a fight begins so the three-stage timeline (intro → develop → climax)
+   * always starts fresh from the moment the chase opens.
+   */
+  private startBeat = 0
 
   constructor(
-    skyChart: SkyChartNode[] = DEFAULT_SKY_CHART,
+    skyChart: SkyChartNode[] = DEMO_TRACK.sky,
     transform: Transform3D,
-    groundChart: GroundChartNode[] = DEFAULT_GROUND_CHART,
+    groundChart: GroundChartNode[] = DEMO_TRACK.ground,
   ) {
     this.skyChart = skyChart
     this.groundChart = groundChart
@@ -53,6 +55,29 @@ export class TrackSplineProvider implements ITrackSplineProvider {
 
   setTransform(transform: Transform3D): void {
     this.transform = transform
+  }
+
+  /** Swap in a freshly generated chart (per-battle difficulty director). */
+  setCharts(skyChart: SkyChartNode[], groundChart: GroundChartNode[]): void {
+    this.skyChart = skyChart
+    this.groundChart = groundChart
+  }
+
+  /** Anchor the linear chart so LOCAL beat 0 == this absolute beat. */
+  setStartBeat(beat: number): void {
+    this.startBeat = Math.floor(beat)
+  }
+
+  /** Absolute beat → clamped local chart index (no looping; holds the ends). */
+  private localIndex(beat: number): number {
+    const l = Math.floor(beat) - this.startBeat
+    if (l < 0) return 0
+    const max = this.skyChart.length - 1
+    return l > max ? max : l
+  }
+
+  get transform3DRef(): Transform3D {
+    return this.transform
   }
 
   /** @deprecated */ setConfig(cfg: unknown): void {
@@ -64,13 +89,11 @@ export class TrackSplineProvider implements ITrackSplineProvider {
   }
 
   getGroundNodeAtBeat(beat: number): GroundChartNode {
-    const i = ((Math.floor(beat) % BEATS_PER_BAR) + BEATS_PER_BAR) % BEATS_PER_BAR
-    return this.groundChart[i]
+    return this.groundChart[this.localIndex(beat)]
   }
 
   getSkyNodeAtBeat(beat: number): SkyChartNode {
-    const i = ((Math.floor(beat) % BEATS_PER_BAR) + BEATS_PER_BAR) % BEATS_PER_BAR
-    return this.skyChart[i]
+    return this.skyChart[this.localIndex(beat)]
   }
 
   getNodeAtBeat(beat: number): TrackChartNode {
@@ -89,17 +112,26 @@ export class TrackSplineProvider implements ITrackSplineProvider {
   }
 
   skyAtBeat(beats: number): { x: number; y: number } {
-    const u = ((beats / BEATS_PER_BAR) % 1 + 1) % 1
-    const s = u * BEATS_PER_BAR
-    const i = Math.floor(s) % BEATS_PER_BAR
-    const f = smootherstep(s - Math.floor(s))
-    const im = (i - 1 + BEATS_PER_BAR) % BEATS_PER_BAR
-    const ip = (i + 1) % BEATS_PER_BAR
-    const i2 = (i + 2) % BEATS_PER_BAR
-    const pts = [this.skyChart[im], this.skyChart[i], this.skyChart[ip], this.skyChart[i2]]
+    const len = this.skyChart.length
+    // Linear (non-looping) local position along the whole level timeline.
+    const local = beats - this.startBeat
+    const c = local < 0 ? 0 : local > len - 1 - 1e-4 ? len - 1 - 1e-4 : local
+    const i = Math.floor(c)
+    // UNIFORM parameter (not eased): the 4-point Catmull-Rom below already gives
+    // a silk-smooth C1 path; warping `f` with smootherstep would force velocity
+    // to 0 at every node and lurch between them ("transition too fast / rigid").
+    const f = c - i
+    // Clamp neighbour indices to the array bounds (hold the ends — no wrap seam).
+    const im = i - 1 < 0 ? 0 : i - 1
+    const ip = i + 1 > len - 1 ? len - 1 : i + 1
+    const i2 = i + 2 > len - 1 ? len - 1 : i + 2
+    const p0 = this.skyChart[im]
+    const p1 = this.skyChart[i]
+    const p2 = this.skyChart[ip]
+    const p3 = this.skyChart[i2]
     return {
-      x: cr(pts[0].x, pts[1].x, pts[2].x, pts[3].x, f),
-      y: cr(pts[0].y, pts[1].y, pts[2].y, pts[3].y, f),
+      x: cr(p0.x, p1.x, p2.x, p3.x, f),
+      y: cr(p0.y, p1.y, p2.y, p3.y, f),
     }
   }
 

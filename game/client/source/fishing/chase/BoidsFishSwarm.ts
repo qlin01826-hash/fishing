@@ -1,4 +1,4 @@
-import type { CameraDynamics, ProjectedPoint } from './Transform3D'
+import type { CameraDynamics } from './Transform3D'
 import { Transform3D } from './Transform3D'
 import type { TrackSplineProvider } from './TrackSplineProvider'
 
@@ -31,7 +31,7 @@ export class BoidsFishSwarm {
     dyn: CameraDynamics,
   ): void {
     const evac = this.flowState === 'Beat_Evacuation'
-    const targetCount = evac ? 0 : Math.floor(40 + this.intensity * 80)
+    const targetCount = evac ? 0 : Math.floor(24 + this.intensity * 46)
 
     while (this.boids.length < targetCount && !evac) {
       const side = Math.random() > 0.5 ? 1 : -1
@@ -78,12 +78,13 @@ export class BoidsFishSwarm {
   }
 
   draw(g: import('pixi.js').Graphics, transform: Transform3D, dyn: CameraDynamics, tint: number): void {
-    const sorted = [...this.boids]
-      .map((b) => ({ b, p: transform.project(b.worldX, b.worldY, b.worldZ, dyn) }))
-      .filter((x): x is { b: Boid; p: ProjectedPoint } => x.p !== null)
-      .sort((a, c) => c.b.worldZ - a.b.worldZ)
+    // Painter order, far first — sort the live array in place (no per-frame
+    // wrapper-array/map/filter allocations). Sim order is irrelevant.
+    this.boids.sort((a, c) => c.worldZ - a.worldZ)
 
-    for (const { b, p } of sorted) {
+    for (const b of this.boids) {
+      const p = transform.project(b.worldX, b.worldY, b.worldZ, dyn)
+      if (!p) continue
       const a = b.life * 0.7 * (1 - p.fog * 0.5)
       const rx = 5 * p.scale
       const ry = 2 * p.scale

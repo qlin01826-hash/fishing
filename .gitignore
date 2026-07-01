@@ -10,3 +10,5 @@ dist-standalone
 
 # pnpm store
 .pnpm-store/
+
+.vercel
